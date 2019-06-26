@@ -1,0 +1,8 @@
+[package]
+name = "amd64"
+version = "0.1.0"
+authors = ["Laurenz <laurmaedje@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+byteorder = "1"
