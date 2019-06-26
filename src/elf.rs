@@ -46,6 +46,7 @@ pub struct SectionHeader {
 #[derive(Debug, Clone)]
 pub struct Section {
     pub name: Option<String>,
+    pub header: SectionHeader,
     pub data: Vec<u8>,
 }
 
@@ -163,7 +164,7 @@ impl<R> ElfReader<R> where R: Read + Seek {
                 None
             };
 
-            let section = Section { name, data };
+            let section = Section { name, header: table, data };
             sections.push(section);
         }
 
