@@ -97,18 +97,18 @@ impl Debug for Instruction {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use super::elf::ElfReader;
-    use super::*;
+    use super::{elf::*, *};
 
     #[test]
     fn disassemble() {
-        // Read the text section from the file.
+        // Read the text section from the binary file.
         let bin = fs::read("test/block").unwrap();
-        let mut reader = ElfReader::from_slice(&bin);
-        let text = reader.get_section(".text").unwrap();
+        let mut file = ElfFile::from_slice(&bin).unwrap();
+        let text = file.get_section(".text").unwrap();
 
+        // Disassemble one basic block, the <compare> function at address 0x2b1.
         let code = Code::new(text.header.addr, &text.data);
-        let block = code.disassemble_block(0x00000000000002b1);
+        let block = code.disassemble_block(0x2b1);
         println!("compare: {:#?}", block);
     }
 }
