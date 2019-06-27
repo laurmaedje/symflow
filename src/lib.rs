@@ -3,7 +3,7 @@
 #![allow(unused)]
 
 use std::fmt::{self, Debug, Display, Formatter};
-use amd64::{Instruction, DecodeResult};
+use amd64::{Instruction, Mnemoic, DecodeResult};
 
 pub mod elf;
 pub mod amd64;
@@ -29,8 +29,9 @@ impl<'a> Code<'a> {
         let mut addr = self.base;
         while addr - self.base < self.code.len() as u64 {
             let inst = self.disassemble_instruction(addr)?;
-            addr += inst.bytes.len() as u64;
-            instructions.push(inst);
+            let len = inst.bytes.len() as u64;
+            instructions.push((addr, inst));
+            addr += len;
         }
 
         Ok(Block { instructions })
@@ -43,14 +44,15 @@ impl<'a> Code<'a> {
         let mut finished = false;
         while !finished && addr - self.base < self.code.len() as u64 {
             let inst = self.disassemble_instruction(addr)?;
-            addr += inst.bytes.len() as u64;
+            let len = inst.bytes.len() as u64;
 
-            // If this is a `retq` instruction, the block is ended.
-            if &inst.bytes == &[0xc3] {
+            // If this is a `ret` instruction, the block is ended.
+            if inst.mnemoic == Mnemoic::Ret {
                 finished = true;
             }
 
-            instructions.push(inst);
+            instructions.push((addr, inst));
+            addr += len;
         }
 
         Ok(Block { instructions })
@@ -58,7 +60,7 @@ impl<'a> Code<'a> {
 
     /// Tries to decode a single instruction at an address.
     pub fn disassemble_instruction(&self, addr: u64) -> DecodeResult<Instruction> {
-        let len = lde::X64.ld(&self.code[(addr - self.base) as usize ..]) as u64;
+        let len = Instruction::length(&self.code[(addr - self.base) as usize ..]) as u64;
         let bytes = &self.code[(addr - self.base) as usize .. (addr + len - self.base) as usize];
         Instruction::decode(bytes)
     }
@@ -67,27 +69,35 @@ impl<'a> Code<'a> {
 /// Block of machine code instructions.
 #[derive(Debug, Clone)]
 pub struct Block {
-    pub instructions: Vec<Instruction>,
+    pub instructions: Vec<(u64, Instruction)>,
+}
+
+impl Display for Block {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        writeln!(f, "Block [")?;
+        for (addr, instruction) in &self.instructions {
+            writeln!(f, "    {:x}:  {}", addr, instruction);
+        }
+        write!(f, "]")
+    }
 }
 
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use super::{elf::*, *};
+    use super::elf::*;
+    use super::*;
 
     #[test]
     fn disassemble() {
         // Read the text section from the binary file.
-        let bin = fs::read("test/block").unwrap();
+        let bin = std::fs::read("test/block").unwrap();
         let mut file = ElfFile::from_slice(&bin).unwrap();
         let text = file.get_section(".text").unwrap();
 
-        // Disassemble one basic block, the <compare> function at address 0x2b1.
+        // Disassemble the whole code and print it.
         let code = Code::new(text.header.addr, &text.data);
-        let all = code.disassemble_all();
-        println!("{:#?}", all);
-        // let block = code.disassemble_block(0x2b1);
-        // println!("compare: {:#?}", block);
+        let all = code.disassemble_all().unwrap();
+        println!("{}", all);
     }
 }
