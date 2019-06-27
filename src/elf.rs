@@ -3,12 +3,12 @@
 //! (Currently assumes 64-bit little endian).
 
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
-use std::fmt::{self, Display, Formatter};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::ffi::CStr;
 use byteorder::{ReadBytesExt, LE};
 
 
-/// The header of an ELF file.
+/// Header of an ELF file.
 #[derive(Debug, Copy, Clone)]
 pub struct Header {
     pub identification: [u8; 16],
@@ -27,10 +27,10 @@ pub struct Header {
     pub section_name_string_table_index: u16,
 }
 
-/// The section header table.
+/// Section header table.
 #[derive(Debug, Clone)]
 pub struct SectionHeader {
-    pub name: Option<String>,
+    pub name: String,
     pub name_offset: u32,
     pub section_type: u32,
     pub flags: u64,
@@ -43,7 +43,7 @@ pub struct SectionHeader {
     pub entry_size: u64,
 }
 
-/// A section in the file.
+/// Section in the ELF file.
 #[derive(Debug, Clone)]
 pub struct Section {
     pub header: SectionHeader,
@@ -84,10 +84,9 @@ impl<R> ElfFile<R> where R: Read + Seek {
 
     /// Retrieve the section with a specific name if it is present.
     pub fn get_section(&mut self, name: &str) -> ElfResult<Section> {
-        let header = self.section_headers.iter().find(|header| match &header.name {
-            Some(n) => n == name,
-            None => false,
-        }).ok_or_else(|| ElfError::MissingSection(name.to_owned()))?;
+        let header = self.section_headers.iter()
+            .find(|header| header.name == name)
+            .ok_or_else(|| ElfError::MissingSection(name.to_owned()))?;
 
         let mut data = vec![0; header.size as usize];
         self.target.seek(SeekFrom::Start(header.offset))?;
@@ -144,7 +143,7 @@ fn parse_section_headers<R>(header: Header, target: &mut R)
     let mut headers = Vec::with_capacity(header.section_header_entries as usize);
     for _ in 0 .. header.section_header_entries {
         let header = SectionHeader {
-            name: None,
+            name: String::new(),
             name_offset: target.read_u32::<LE>()?,
             section_type: target.read_u32::<LE>()?,
             flags: target.read_u64::<LE>()?,
@@ -169,7 +168,7 @@ fn parse_section_headers<R>(header: Header, target: &mut R)
 
     // Fill in the missing names for all sections.
     for table in headers.iter_mut() {
-        table.name = if table.name_offset != 0 {
+        table.name = {
             let start = table.name_offset as usize;
             let mut zero = start;
             while strings[zero] != 0 {
@@ -177,9 +176,7 @@ fn parse_section_headers<R>(header: Header, target: &mut R)
             }
 
             let name_str = CStr::from_bytes_with_nul(&strings[start .. zero + 1]).unwrap();
-            Some(name_str.to_string_lossy().into_owned())
-        } else {
-            None
+            name_str.to_string_lossy().into_owned()
         };
     }
 
@@ -187,8 +184,7 @@ fn parse_section_headers<R>(header: Header, target: &mut R)
 }
 
 
-/// The error type for ELF loading.
-#[derive(Debug)]
+/// Error type for ELF loading.
 pub enum ElfError {
     MissingSection(String),
     Io(io::Error),
@@ -207,9 +203,15 @@ impl std::error::Error for ElfError {
 impl Display for ElfError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            ElfError::MissingSection(name) => write!(f, "missing section: {}", name),
-            ElfError::Io(err) => write!(f, "io error: {}", err),
+            ElfError::MissingSection(name) => write!(f, "Missing section: {}", name),
+            ElfError::Io(err) => write!(f, "I/O error: {}", err),
         }
+    }
+}
+
+impl Debug for ElfError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(self, f)
     }
 }
 

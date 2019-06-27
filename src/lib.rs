@@ -1,12 +1,15 @@
-//! Decodes `amd64` binaries.
+//! Machine code slicer for the AMD-64 architecture based on symbolic execution. 💻
 
 #![allow(unused)]
 
 use std::fmt::{self, Debug, Display, Formatter};
+use amd64::{Instruction, DecodeResult};
+
 pub mod elf;
+pub mod amd64;
 
 
-/// A view into machine code.
+/// View into a slice of machine code.
 #[derive(Debug)]
 pub struct Code<'a> {
     base: u64,
@@ -20,26 +23,26 @@ impl<'a> Code<'a> {
     }
 
     /// Disassemble the whole code.
-    pub fn disassemble_all(&self) -> Block {
+    pub fn disassemble_all(&self) -> DecodeResult<Block> {
         let mut instructions = Vec::new();
 
         let mut addr = self.base;
         while addr - self.base < self.code.len() as u64 {
-            let inst = self.disassemble_instruction(addr);
+            let inst = self.disassemble_instruction(addr)?;
             addr += inst.bytes.len() as u64;
             instructions.push(inst);
         }
 
-        Block { instructions }
+        Ok(Block { instructions })
     }
 
     /// Disassemble a basic block at an address.
-    pub fn disassemble_block(&self, mut addr: u64) -> Block {
+    pub fn disassemble_block(&self, mut addr: u64) -> DecodeResult<Block> {
         let mut instructions = Vec::new();
 
         let mut finished = false;
         while !finished && addr - self.base < self.code.len() as u64 {
-            let inst = self.disassemble_instruction(addr);
+            let inst = self.disassemble_instruction(addr)?;
             addr += inst.bytes.len() as u64;
 
             // If this is a `retq` instruction, the block is ended.
@@ -50,47 +53,21 @@ impl<'a> Code<'a> {
             instructions.push(inst);
         }
 
-        Block { instructions }
+        Ok(Block { instructions })
     }
 
-    /// Decode a single instruction at an address.
-    pub fn disassemble_instruction(&self, addr: u64) -> Instruction {
+    /// Tries to decode a single instruction at an address.
+    pub fn disassemble_instruction(&self, addr: u64) -> DecodeResult<Instruction> {
         let len = lde::X64.ld(&self.code[(addr - self.base) as usize ..]) as u64;
-        Instruction {
-            addr,
-            bytes: self.code[(addr - self.base) as usize
-                             .. (addr + len - self.base) as usize].to_vec(),
-        }
+        let bytes = &self.code[(addr - self.base) as usize .. (addr + len - self.base) as usize];
+        Instruction::decode(bytes)
     }
 }
 
-/// A block of machine code instructions.
-#[derive(Debug)]
+/// Block of machine code instructions.
+#[derive(Debug, Clone)]
 pub struct Block {
     pub instructions: Vec<Instruction>,
-}
-
-/// A machine code instruction.
-pub struct Instruction {
-    pub addr: u64,
-    pub bytes: Vec<u8>,
-}
-
-impl Display for Instruction {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "0x{:x}:", self.addr)?;
-        for &byte in &self.bytes {
-            write!(f, " {:02x}", byte)?;
-        }
-        Ok(())
-    }
-}
-
-impl Debug for Instruction {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        Display::fmt(self, f)
-
-    }
 }
 
 
@@ -108,7 +85,9 @@ mod tests {
 
         // Disassemble one basic block, the <compare> function at address 0x2b1.
         let code = Code::new(text.header.addr, &text.data);
-        let block = code.disassemble_block(0x2b1);
-        println!("compare: {:#?}", block);
+        let all = code.disassemble_all();
+        println!("{:#?}", all);
+        // let block = code.disassemble_block(0x2b1);
+        // println!("compare: {:#?}", block);
     }
 }

@@ -1,5 +1,5 @@
 [package]
-name = "amd64"
+name = "symslice"
 version = "0.1.0"
 authors = ["Laurenz <laurmaedje@gmail.com>"]
 edition = "2018"
