@@ -22,31 +22,11 @@ impl Instruction {
         let mut index = 0;
 
         // Parse the optional REX prefix.
-        let rex = (bytes[index] ^ 0b01000000) < 16;
-        let mut rex_w = false;
-        let mut rex_r = false;
-        let mut rex_x = false;
-        let mut rex_b = false;
-        if rex {
-            rex_w = bytes[index] & 0b00001000 > 0;
-            rex_r = bytes[index] & 0b00000100 > 0;
-            rex_x = bytes[index] & 0b00000010 > 0;
-            rex_b = bytes[index] & 0b00000001 > 0;
-            index += 1;
-        }
+        let rex = decode_rex(bytes[index], &mut index);
 
         // Parse the opcode.
-        let mut opcode_len = 1;
-        if bytes[index] == 0x0f {
-            opcode_len += 1;
-            if bytes[index + 1] == 0x38 || bytes[index + 1] == 0x3a {
-                opcode_len += 1;
-            }
-        }
-        let opcode = &bytes[index .. index + opcode_len];
-        index += opcode_len;
-        let (mnemoic, op) = decode_opcode(rex_w, opcode, &bytes[index ..])
-            .ok_or_else(|| DecodeError { bytes: bytes.to_vec() })?;
+        let (opcode, operation) = decode_opcode(rex, &bytes[index..], &mut index);
+        let (mnemoic, op) = operation.ok_or_else(|| DecodeError { bytes: bytes.to_vec() })?;
 
         // Construct the operands.
         let mut operands = Vec::new();
@@ -56,25 +36,26 @@ impl Instruction {
             operands.push(Operand::Direct(reg));
 
         } else if let PlusIm(base, width, im_w) = op {
+            // Decode the register from the opcode.
             let reg = Register::from_bits(false, opcode[0] - base, width);
             operands.push(Operand::Direct(reg));
 
             // Parse the immediate.
-            let (immediate, off) = decode_immediate(im_w, &bytes[index..]);
+            let immediate = decode_immediate(im_w, &bytes[index..], &mut index);
             operands.push(Operand::Immediate(immediate));
 
         } else if let Rm(rm_w) = op {
             // Parse just the R/M part and add a direct operand with it.
-            let modrm_rm = decode_modrm(bytes[index]).2;
-            operands.push(construct_modrm_rm(rex_b, modrm_rm, rm_w, None));
+            let modrm_rm = decode_modrm(bytes[index], &mut index).2;
+            operands.push(construct_modrm_rm(rex.b, modrm_rm, rm_w, None));
 
         } else if let RegRm(reg_w, rm_w, ordered) = op {
             // Parse the ModR/M byte with displacement.
-            let (modrm_reg, modrm_rm, displace, off) = decode_modrm_displaced(&bytes[index..]);
+            let (reg, rm, displace) = decode_modrm_displaced(&bytes[index..], &mut index);
 
             // Construct the operands.
-            let p = construct_modrm_reg(rex_r, modrm_reg, reg_w);
-            let s = construct_modrm_rm(rex_b, modrm_rm, rm_w, displace);
+            let p = construct_modrm_reg(rex.r, reg, reg_w);
+            let s = construct_modrm_rm(rex.b, rm, rm_w, displace);
 
             // Insert them in the ordered denoted by the opcode.
             if ordered {
@@ -85,19 +66,18 @@ impl Instruction {
 
         } else if let RmIm(rm_w, im_w) = op {
             // Parse the ModR/M byte with displacement.
-            let (modrm_reg, modrm_rm, displace, off) = decode_modrm_displaced(&bytes[index..]);
-            index += off;
+            let (_, rm, displace) = decode_modrm_displaced(&bytes[index..], &mut index);
 
             // Parse the immediate.
-            let (immediate, off) = decode_immediate(im_w, &bytes[index..]);
+            let immediate = decode_immediate(im_w, &bytes[index..], &mut index);
 
             // Construct and insert the operands.
-            operands.push(construct_modrm_rm(rex_b, modrm_rm, rm_w, displace));
+            operands.push(construct_modrm_rm(rex.b, rm, rm_w, displace));
             operands.push(Operand::Immediate(immediate));
 
         } else if let Rel(width) = op {
             // Parse the relative offset and adjust it by the length of this instruction.
-            let (mut offset, off) = decode_offset(width, &bytes[index..]);
+            let mut offset = decode_offset(width, &bytes[index..], &mut index);
             offset += bytes.len() as i64;
 
             operands.push(Operand::Offset(offset));
@@ -116,21 +96,56 @@ impl Instruction {
     }
 }
 
-/// Decode the opcode.
-fn decode_opcode(rex_w: bool, opcode: &[u8], remaining: &[u8])
-    -> Option<(Mnemoic, OperandLayout)> {
-    use OperandLayout::*;
-    use DataWidth::*;
+/// Decode the REX prefix.
+fn decode_rex(byte: u8, index: &mut usize) -> RexPrefix {
+    let rex = (byte ^ 0b01000000) < 16;
+    if rex {
+        *index += 1;
+    }
 
-    // The default widths for reg und r/m.
-    let scaled = if rex_w { Bits64 } else { Bits32 };
+    RexPrefix {
+        w: rex && (byte & 0b00001000 > 0),
+        r: rex && (byte & 0b00000100 > 0),
+        x: rex && (byte & 0b00000010 > 0),
+        b: rex && (byte & 0b00000001 > 0),
+    }
+}
+
+/// REX prefix.
+#[derive(Debug, Copy, Clone)]
+struct RexPrefix {
+    w: bool,
+    r: bool,
+    x: bool,
+    b: bool,
+}
+
+/// Decode the opcode.
+fn decode_opcode<'a>(rex: RexPrefix, bytes: &'a [u8], index: &mut usize)
+    -> (&'a [u8], Option<(Mnemoic, OperandLayout)>) {
+    use DataWidth::*;
+    use OperandLayout::*;
+
+    // Find out the length of the opcode and adjust the index.
+    let mut len = 1;
+    if bytes[0] == 0x0f {
+        len += 1;
+        if bytes[1] == 0x38 || bytes[1] == 0x3a {
+            len += 1;
+        }
+    }
+    let opcode = &bytes[..len];
+    *index += opcode.len();
+
+    // The default widths for reg und r/m depends on the rex prefix.
+    let scaled = if rex.w { Bits64 } else { Bits32 };
 
     // The instruction extension (0 - 7), uses the reg field of ModR/M.
-    let ext = remaining.get(0).map(|byte| {
+    let ext = bytes[opcode.len()..].get(0).map(|byte| {
         (byte & 0b00111000) >> 3
     });
 
-    Some(match opcode {
+    (opcode, Some(match opcode {
         &[0x01] => (Mnemoic::Add, RegRm(scaled, scaled, false)),
         &[0x03] => (Mnemoic::Add, RegRm(scaled, scaled, true)),
         &[0x83] if ext == Some(5) => (Mnemoic::Sub, RmIm(scaled, Bits8)),
@@ -162,8 +177,8 @@ fn decode_opcode(rex_w: bool, opcode: &[u8], remaining: &[u8])
         &[0xc3] => (Mnemoic::Ret, Free),
         &[0x0f, 0x05] => (Mnemoic::Syscall, Free),
 
-        _ => return None,
-    })
+        _ => return (opcode, None),
+    }))
 }
 
 /// Describes the operand layout of the instruction.
@@ -181,52 +196,59 @@ enum OperandLayout {
 /// Decodes the ModR/M byte and displacement and returns a
 /// (reg, rm, offset, bytes_read) quadruple, where bytes denotes how
 /// many bytes where used from the slice.
-fn decode_modrm_displaced(bytes: &[u8]) -> (u8, u8, Option<i64>, usize) {
-    let (modus, reg, rm) = decode_modrm(bytes[0]);
-    let (displacement, off) = decode_displacement(modus, &bytes[1..]);
-    (reg, rm, displacement, 1 + off)
+fn decode_modrm_displaced(bytes: &[u8], index: &mut usize) -> (u8, u8, Option<i64>) {
+    let (modus, reg, rm) = decode_modrm(bytes[0], index);
+    let displacement = decode_displacement(modus, &bytes[1..], index);
+    (reg, rm, displacement)
 }
 
 /// Decodes the ModR/M byte and returns a (modus, reg, rm) triple.
-fn decode_modrm(byte: u8) -> (u8, u8, u8) {
+fn decode_modrm(byte: u8, index: &mut usize) -> (u8, u8, u8) {
     let modus = byte >> 6;
     let reg = (byte & 0b00111000) >> 3;
     let rm = byte & 0b00000111;
+    *index += 1;
     (modus, reg, rm)
 }
 
 /// Decodes the displacement and returns an (offset, bytes_read) pair.
-fn decode_displacement(modrm_modus: u8, bytes: &[u8]) -> (Option<i64>, usize) {
-    match modrm_modus {
+fn decode_displacement(modrm_modus: u8, bytes: &[u8], index: &mut usize) -> Option<i64> {
+    let (displace, off) = match modrm_modus {
         0b00 => (Some(0), 0),
         0b01 => (Some((bytes[0] as i8) as i64), 1),
-        0b10 => (Some(LittleEndian::read_i32(&bytes[.. 4]) as i64), 4),
+        0b10 => (Some(LittleEndian::read_i32(&bytes) as i64), 4),
         0b11 => (None, 0),
         _ => panic!("decode_displacement: invalid modrm_modus"),
-    }
+    };
+    *index += off;
+    displace
 }
 
 /// Decodes an immediate value with given bit width and returns an
 /// (immediate, bytes_read) pair.
-fn decode_immediate(width: DataWidth, bytes: &[u8]) -> (u64, usize) {
+fn decode_immediate(width: DataWidth, bytes: &[u8], index: &mut usize) -> u64 {
     use DataWidth::*;
-    match width {
+    let (imm, off) = match width {
         Bits8 => (bytes[0] as u64, 1),
         Bits16 => (LittleEndian::read_u16(bytes) as u64, 2),
         Bits32 => (LittleEndian::read_u32(bytes) as u64, 4),
         Bits64 => (LittleEndian::read_u64(bytes), 8),
-    }
+    };
+    *index += off;
+    imm
 }
 
 /// Decodes an offset value similar to [`decode_immediate`].
-fn decode_offset(width: DataWidth, bytes: &[u8]) -> (i64, usize) {
+fn decode_offset(width: DataWidth, bytes: &[u8], index: &mut usize) -> i64 {
     use DataWidth::*;
-    match width {
+    let (offset, off) = match width {
         Bits8 => ((bytes[0] as i8) as i64, 1),
         Bits16 => (LittleEndian::read_i16(bytes) as i64, 2),
         Bits32 => (LittleEndian::read_i32(bytes) as i64, 4),
         Bits64 => (LittleEndian::read_i64(bytes), 8),
-    }
+    };
+    *index += off;
+    offset
 }
 
 /// Construct an operand from the reg part of ModR/M.
@@ -324,6 +346,19 @@ impl Display for Register {
 }
 
 impl Register {
+    /// Bitwidth of the register.
+    pub fn width(&self) -> DataWidth {
+        use Register::*;
+        match self {
+            RAX | RCX | RDX | RBX | RSP | RBP | RSI | RDI |
+            R8 | R9 | R10 | R11 | R12 | R13 | R14 | R15 => DataWidth::Bits64,
+            EAX | ECX | EDX | EBX | ESP | EBP | ESI | EDI => DataWidth::Bits32,
+            AX | CX | DX | BX | SP | BP | SI | DI => DataWidth::Bits16,
+            AL | CL | DL | BL | AH | CH | DH | BH => DataWidth::Bits8,
+        }
+    }
+
+    /// Decodes the register from the bit pattern in the instruction.
     fn from_bits(alt: bool, reg: u8, width: DataWidth) -> Register {
         use Register::*;
         match (alt, reg) {
@@ -350,7 +385,7 @@ impl Register {
 
 /// Width of data in bits.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-enum DataWidth {
+pub enum DataWidth {
     Bits8 = 0,
     Bits16 = 1,
     Bits32 = 2,

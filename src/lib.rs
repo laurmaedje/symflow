@@ -3,10 +3,11 @@
 #![allow(unused)]
 
 use std::fmt::{self, Debug, Display, Formatter};
-use amd64::{Instruction, Mnemoic, DecodeResult};
+use crate::amd64::{Instruction, Mnemoic, DecodeResult};
 
 pub mod elf;
 pub mod amd64;
+pub mod ir;
 
 
 /// View into a slice of machine code.
@@ -76,7 +77,7 @@ impl Display for Block {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         writeln!(f, "Block [")?;
         for (addr, instruction) in &self.instructions {
-            writeln!(f, "    {:x}:  {}", addr, instruction);
+            writeln!(f, "    {:x}:  {}", addr, instruction)?;
         }
         write!(f, "]")
     }
@@ -98,6 +99,5 @@ mod tests {
         // Disassemble the whole code and print it.
         let code = Code::new(text.header.addr, &text.data);
         let all = code.disassemble_all().unwrap();
-        println!("{}", all);
     }
 }

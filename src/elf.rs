@@ -1,4 +1,4 @@
-//! Parsing of the ELF file format.
+//! Parses the ELF file format.
 //!
 //! (Currently assumes 64-bit little endian).
 
