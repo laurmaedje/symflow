@@ -1,7 +1,6 @@
 //! Decodes `amd64` instructions.
 
 use std::fmt::{self, Debug, Display, Formatter};
-use std::io::Cursor;
 use byteorder::{ByteOrder, LittleEndian};
 
 
@@ -16,17 +15,38 @@ pub struct Instruction {
 impl Instruction {
     /// Tries to decode an instruction from bytes.
     pub fn decode(bytes: &[u8]) -> DecodeResult<Instruction> {
-        use DataWidth::*;
+        Decoder::new(bytes).decode()
+    }
+
+    /// The length of the first instruction in the slice.
+    pub fn length(bytes: &[u8]) -> usize {
+        lde::X64.ld(bytes) as usize
+    }
+}
+
+/// Decodes instructions.
+#[derive(Debug)]
+struct Decoder<'a> {
+    bytes: &'a [u8],
+    index: usize,
+}
+
+impl<'a> Decoder<'a> {
+    /// Create a new decoder.
+    fn new(bytes: &'a [u8]) -> Decoder<'a> {
+        Decoder { bytes, index: 0 }
+    }
+
+    /// Decode the bytes into an instruction.
+    fn decode(mut self) -> DecodeResult<Instruction> {
         use OperandLayout::*;
 
-        let mut index = 0;
-
         // Parse the optional REX prefix.
-        let rex = decode_rex(bytes[index], &mut index);
+        let rex = self.decode_rex();
 
         // Parse the opcode.
-        let (opcode, operation) = decode_opcode(rex, &bytes[index..], &mut index);
-        let (mnemoic, op) = operation.ok_or_else(|| DecodeError { bytes: bytes.to_vec() })?;
+        let (opcode, operation) = self.decode_opcode(rex);
+        let (mnemoic, op) = operation.ok_or_else(|| DecodeError { bytes: self.bytes.to_vec() })?;
 
         // Construct the operands.
         let mut operands = Vec::new();
@@ -41,17 +61,17 @@ impl Instruction {
             operands.push(Operand::Direct(reg));
 
             // Parse the immediate.
-            let immediate = decode_immediate(im_w, &bytes[index..], &mut index);
+            let immediate = self.decode_immediate(im_w);
             operands.push(Operand::Immediate(immediate));
 
         } else if let Rm(rm_w) = op {
             // Parse just the R/M part and add a direct operand with it.
-            let modrm_rm = decode_modrm(bytes[index], &mut index).2;
+            let modrm_rm = self.decode_modrm().2;
             operands.push(construct_modrm_rm(rex.b, modrm_rm, rm_w, None));
 
         } else if let RegRm(reg_w, rm_w, ordered) = op {
             // Parse the ModR/M byte with displacement.
-            let (reg, rm, displace) = decode_modrm_displaced(&bytes[index..], &mut index);
+            let (reg, rm, displace) = self.decode_modrm_displaced();
 
             // Construct the operands.
             let p = construct_modrm_reg(rex.r, reg, reg_w);
@@ -66,10 +86,10 @@ impl Instruction {
 
         } else if let RmIm(rm_w, im_w) = op {
             // Parse the ModR/M byte with displacement.
-            let (_, rm, displace) = decode_modrm_displaced(&bytes[index..], &mut index);
+            let (_, rm, displace) = self.decode_modrm_displaced();
 
             // Parse the immediate.
-            let immediate = decode_immediate(im_w, &bytes[index..], &mut index);
+            let immediate = self.decode_immediate(im_w);
 
             // Construct and insert the operands.
             operands.push(construct_modrm_rm(rex.b, rm, rm_w, displace));
@@ -77,37 +97,154 @@ impl Instruction {
 
         } else if let Rel(width) = op {
             // Parse the relative offset and adjust it by the length of this instruction.
-            let mut offset = decode_offset(width, &bytes[index..], &mut index);
-            offset += bytes.len() as i64;
+            let mut offset = self.decode_offset(width);
+            offset += self.bytes.len() as i64;
 
             operands.push(Operand::Offset(offset));
         }
 
         Ok(Instruction {
-            bytes: bytes.to_vec(),
+            bytes: self.bytes.to_vec(),
             mnemoic,
             operands,
         })
     }
 
-    /// The length of the first instruction in the slice.
-    pub fn length(bytes: &[u8]) -> usize {
-        lde::X64.ld(bytes) as usize
-    }
-}
+    /// Decode the REX prefix.
+    fn decode_rex(&mut self) -> RexPrefix {
+        let byte = self.bytes[self.index];
+        let rex = (byte ^ 0b01000000) < 16;
+        if rex {
+            self.index += 1;
+        }
 
-/// Decode the REX prefix.
-fn decode_rex(byte: u8, index: &mut usize) -> RexPrefix {
-    let rex = (byte ^ 0b01000000) < 16;
-    if rex {
-        *index += 1;
+        RexPrefix {
+            w: rex && (byte & 0b00001000 > 0),
+            r: rex && (byte & 0b00000100 > 0),
+            x: rex && (byte & 0b00000010 > 0),
+            b: rex && (byte & 0b00000001 > 0),
+        }
     }
 
-    RexPrefix {
-        w: rex && (byte & 0b00001000 > 0),
-        r: rex && (byte & 0b00000100 > 0),
-        x: rex && (byte & 0b00000010 > 0),
-        b: rex && (byte & 0b00000001 > 0),
+    /// Decode the opcode.
+    fn decode_opcode(&mut self, rex: RexPrefix) -> (&'a [u8], Option<(Mnemoic, OperandLayout)>) {
+        use DataWidth::*;
+        use OperandLayout::*;
+
+        // Find out the length of the opcode and adjust the index.
+        let mut len = 1;
+        if self.bytes[self.index] == 0x0f {
+            len += 1;
+            if self.bytes[self.index + 1] == 0x38 || self.bytes[self.index + 1] == 0x3a {
+                len += 1;
+            }
+        }
+        let opcode = &self.bytes[self.index .. self.index + len];
+        self.index += opcode.len();
+
+        // The default widths for reg und r/m depends on the rex prefix.
+        let scaled = if rex.w { Bits64 } else { Bits32 };
+
+        // The instruction extension (0 - 7), uses the reg field of ModR/M.
+        let ext = self.bytes[self.index ..].get(0).map(|byte| {
+            (byte & 0b00111000) >> 3
+        });
+
+        (opcode, Some(match opcode {
+            &[0x01] => (Mnemoic::Add, RegRm(scaled, scaled, false)),
+            &[0x03] => (Mnemoic::Add, RegRm(scaled, scaled, true)),
+            &[0x83] if ext == Some(5) => (Mnemoic::Sub, RmIm(scaled, Bits8)),
+            &[0x0f, 0xaf] => (Mnemoic::Imul, RegRm(scaled, scaled, true)),
+
+            &[x] if 0x50 <= x && x < 0x58 => (Mnemoic::Push, Plus(0x50, Bits64)),
+            &[x] if 0x58 <= x && x < 0x60 => (Mnemoic::Pop, Plus(0x58, Bits64)),
+
+            &[0x89] => (Mnemoic::Mov, RegRm(scaled, scaled, false)),
+            &[0x8b] => (Mnemoic::Mov, RegRm(scaled, scaled, true)),
+            &[0xc7] => (Mnemoic::Mov, RmIm(scaled, Bits32)),
+            &[x] if 0xb8 <= x && x < 0xc0 => (Mnemoic::Mov, PlusIm(0xb8, scaled, scaled)),
+            &[0x0f, 0xb6] => (Mnemoic::Movzx, RegRm(scaled, Bits8, true)),
+
+            &[0x8d] => (Mnemoic::Lea, RegRm(scaled, scaled, true)),
+
+            &[0x83] if ext == Some(7) => (Mnemoic::Cmp, RmIm(scaled, Bits8)),
+            &[0x3b] => (Mnemoic::Cmp, RegRm(scaled, scaled, true)),
+            &[0x85] => (Mnemoic::Test, RegRm(scaled, scaled, true)),
+            &[0x0f, 0x9c] => (Mnemoic::Set, Rm(Bits8)),
+
+            &[0x7f] =>(Mnemoic::Jg, Rel(Bits8)),
+            &[0x74] =>(Mnemoic::Je, Rel(Bits8)),
+            &[0xeb] =>(Mnemoic::Jmp, Rel(Bits8)),
+            &[0xe8] =>(Mnemoic::Call, Rel(Bits16)),
+
+            &[0x90] => (Mnemoic::Nop, Free),
+            &[0xc9] => (Mnemoic::Leave, Free),
+            &[0xc3] => (Mnemoic::Ret, Free),
+            &[0x0f, 0x05] => (Mnemoic::Syscall, Free),
+
+            _ => return (opcode, None),
+        }))
+    }
+
+    /// Decodes the ModR/M byte and displacement and returns a
+    /// (reg, rm, offset, bytes_read) quadruple, where bytes denotes how
+    /// many bytes where used from the slice.
+    fn decode_modrm_displaced(&mut self) -> (u8, u8, Option<i64>) {
+        let (modus, reg, rm) = self.decode_modrm();
+        let displacement = self.decode_displacement(modus);
+        (reg, rm, displacement)
+    }
+
+    /// Decodes the ModR/M byte and returns a (modus, reg, rm) triple.
+    fn decode_modrm(&mut self) -> (u8, u8, u8) {
+        let byte = self.bytes[self.index];
+        let modus = byte >> 6;
+        let reg = (byte & 0b00111000) >> 3;
+        let rm = byte & 0b00000111;
+        self.index += 1;
+        (modus, reg, rm)
+    }
+
+    /// Decodes the displacement and returns an (offset, bytes_read) pair.
+    fn decode_displacement(&mut self, modrm_modus: u8) -> Option<i64> {
+        let (displace, off) = match modrm_modus {
+            0b00 => (Some(0), 0),
+            0b01 => (Some((self.bytes[self.index] as i8) as i64), 1),
+            0b10 => (Some(LittleEndian::read_i32(&self.bytes[self.index ..]) as i64), 4),
+            0b11 => (None, 0),
+            _ => panic!("decode_displacement: invalid modrm_modus"),
+        };
+        self.index += off;
+        displace
+    }
+
+    /// Decodes an immediate value with given bit width and returns an
+    /// (immediate, bytes_read) pair.
+    fn decode_immediate(&mut self, width: DataWidth) -> u64 {
+        use DataWidth::*;
+        let bytes = &self.bytes[self.index ..];
+        let (imm, off) = match width {
+            Bits8 => (bytes[0] as u64, 1),
+            Bits16 => (LittleEndian::read_u16(bytes) as u64, 2),
+            Bits32 => (LittleEndian::read_u32(bytes) as u64, 4),
+            Bits64 => (LittleEndian::read_u64(bytes), 8),
+        };
+        self.index += off;
+        imm
+    }
+
+    /// Decodes an offset value similar to [`decode_immediate`].
+    fn decode_offset(&mut self, width: DataWidth) -> i64 {
+        use DataWidth::*;
+        let bytes = &self.bytes[self.index ..];
+        let (offset, off) = match width {
+            Bits8 => ((bytes[0] as i8) as i64, 1),
+            Bits16 => (LittleEndian::read_i16(bytes) as i64, 2),
+            Bits32 => (LittleEndian::read_i32(bytes) as i64, 4),
+            Bits64 => (LittleEndian::read_i64(bytes), 8),
+        };
+        self.index += off;
+        offset
     }
 }
 
@@ -120,67 +257,6 @@ struct RexPrefix {
     b: bool,
 }
 
-/// Decode the opcode.
-fn decode_opcode<'a>(rex: RexPrefix, bytes: &'a [u8], index: &mut usize)
-    -> (&'a [u8], Option<(Mnemoic, OperandLayout)>) {
-    use DataWidth::*;
-    use OperandLayout::*;
-
-    // Find out the length of the opcode and adjust the index.
-    let mut len = 1;
-    if bytes[0] == 0x0f {
-        len += 1;
-        if bytes[1] == 0x38 || bytes[1] == 0x3a {
-            len += 1;
-        }
-    }
-    let opcode = &bytes[..len];
-    *index += opcode.len();
-
-    // The default widths for reg und r/m depends on the rex prefix.
-    let scaled = if rex.w { Bits64 } else { Bits32 };
-
-    // The instruction extension (0 - 7), uses the reg field of ModR/M.
-    let ext = bytes[opcode.len()..].get(0).map(|byte| {
-        (byte & 0b00111000) >> 3
-    });
-
-    (opcode, Some(match opcode {
-        &[0x01] => (Mnemoic::Add, RegRm(scaled, scaled, false)),
-        &[0x03] => (Mnemoic::Add, RegRm(scaled, scaled, true)),
-        &[0x83] if ext == Some(5) => (Mnemoic::Sub, RmIm(scaled, Bits8)),
-        &[0x0f, 0xaf] => (Mnemoic::Imul, RegRm(scaled, scaled, true)),
-
-        &[x] if 0x50 <= x && x < 0x58 => (Mnemoic::Push, Plus(0x50, Bits64)),
-        &[x] if 0x58 <= x && x < 0x60 => (Mnemoic::Pop, Plus(0x58, Bits64)),
-
-        &[0x89] => (Mnemoic::Mov, RegRm(scaled, scaled, false)),
-        &[0x8b] => (Mnemoic::Mov, RegRm(scaled, scaled, true)),
-        &[0xc7] => (Mnemoic::Mov, RmIm(scaled, Bits32)),
-        &[x] if 0xb8 <= x && x < 0xc0 => (Mnemoic::Mov, PlusIm(0xb8, scaled, scaled)),
-        &[0x0f, 0xb6] => (Mnemoic::Movzx, RegRm(scaled, Bits8, true)),
-
-        &[0x8d] => (Mnemoic::Lea, RegRm(scaled, scaled, true)),
-
-        &[0x83] if ext == Some(7) => (Mnemoic::Cmp, RmIm(scaled, Bits8)),
-        &[0x3b] => (Mnemoic::Cmp, RegRm(scaled, scaled, true)),
-        &[0x85] => (Mnemoic::Test, RegRm(scaled, scaled, true)),
-        &[0x0f, 0x9c] => (Mnemoic::Set, Rm(Bits8)),
-
-        &[0x7f] =>(Mnemoic::Jg, Rel(Bits8)),
-        &[0x74] =>(Mnemoic::Je, Rel(Bits8)),
-        &[0xeb] =>(Mnemoic::Jmp, Rel(Bits8)),
-        &[0xe8] =>(Mnemoic::Call, Rel(Bits16)),
-
-        &[0x90] => (Mnemoic::Nop, Free),
-        &[0xc9] => (Mnemoic::Leave, Free),
-        &[0xc3] => (Mnemoic::Ret, Free),
-        &[0x0f, 0x05] => (Mnemoic::Syscall, Free),
-
-        _ => return (opcode, None),
-    }))
-}
-
 /// Describes the operand layout of the instruction.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum OperandLayout {
@@ -191,64 +267,6 @@ enum OperandLayout {
     RegRm(DataWidth, DataWidth, bool),
     RmIm(DataWidth, DataWidth),
     Rel(DataWidth),
-}
-
-/// Decodes the ModR/M byte and displacement and returns a
-/// (reg, rm, offset, bytes_read) quadruple, where bytes denotes how
-/// many bytes where used from the slice.
-fn decode_modrm_displaced(bytes: &[u8], index: &mut usize) -> (u8, u8, Option<i64>) {
-    let (modus, reg, rm) = decode_modrm(bytes[0], index);
-    let displacement = decode_displacement(modus, &bytes[1..], index);
-    (reg, rm, displacement)
-}
-
-/// Decodes the ModR/M byte and returns a (modus, reg, rm) triple.
-fn decode_modrm(byte: u8, index: &mut usize) -> (u8, u8, u8) {
-    let modus = byte >> 6;
-    let reg = (byte & 0b00111000) >> 3;
-    let rm = byte & 0b00000111;
-    *index += 1;
-    (modus, reg, rm)
-}
-
-/// Decodes the displacement and returns an (offset, bytes_read) pair.
-fn decode_displacement(modrm_modus: u8, bytes: &[u8], index: &mut usize) -> Option<i64> {
-    let (displace, off) = match modrm_modus {
-        0b00 => (Some(0), 0),
-        0b01 => (Some((bytes[0] as i8) as i64), 1),
-        0b10 => (Some(LittleEndian::read_i32(&bytes) as i64), 4),
-        0b11 => (None, 0),
-        _ => panic!("decode_displacement: invalid modrm_modus"),
-    };
-    *index += off;
-    displace
-}
-
-/// Decodes an immediate value with given bit width and returns an
-/// (immediate, bytes_read) pair.
-fn decode_immediate(width: DataWidth, bytes: &[u8], index: &mut usize) -> u64 {
-    use DataWidth::*;
-    let (imm, off) = match width {
-        Bits8 => (bytes[0] as u64, 1),
-        Bits16 => (LittleEndian::read_u16(bytes) as u64, 2),
-        Bits32 => (LittleEndian::read_u32(bytes) as u64, 4),
-        Bits64 => (LittleEndian::read_u64(bytes), 8),
-    };
-    *index += off;
-    imm
-}
-
-/// Decodes an offset value similar to [`decode_immediate`].
-fn decode_offset(width: DataWidth, bytes: &[u8], index: &mut usize) -> i64 {
-    use DataWidth::*;
-    let (offset, off) = match width {
-        Bits8 => ((bytes[0] as i8) as i64, 1),
-        Bits16 => (LittleEndian::read_i16(bytes) as i64, 2),
-        Bits32 => (LittleEndian::read_i32(bytes) as i64, 4),
-        Bits64 => (LittleEndian::read_i64(bytes), 8),
-    };
-    *index += off;
-    offset
 }
 
 /// Construct an operand from the reg part of ModR/M.

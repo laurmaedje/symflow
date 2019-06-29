@@ -13,93 +13,165 @@ pub struct Microcode {
 impl Microcode {
     /// Express the given instruction in microcode.
     fn from_instruction(instruction: &Instruction) -> Microcode {
+        Encoder::new(instruction).encode()
+    }
+}
+
+/// Encodes instructions into microcode.
+#[derive(Debug)]
+struct Encoder<'a> {
+    inst: &'a Instruction,
+    ops: Vec<MicroOperation>,
+    temps: usize,
+}
+
+impl<'a> Encoder<'a> {
+    /// Create a new encoder.
+    fn new(inst: &'a Instruction) -> Encoder<'a> {
+        Encoder { inst, ops: vec![], temps: 0 }
+    }
+
+    /// Encode the instruction into microcode.
+    fn encode(mut self) -> Microcode {
         use Mnemoic::*;
-        use Location::*;
         use MicroOperation as Op;
 
-        let mut ops = Vec::new();
-        let inst = instruction;
-        let mut temps = 0;
+        match self.inst.mnemoic {
+            Add => self.encode_binop(|sum, a, b| Op::Add { sum, a, b, flags: true }),
+            Sub => self.encode_binop(|diff, a, b| Op::Sub { diff, a, b, flags: true }),
+            Imul => self.encode_binop(|prod, a, b| Op::Mul { prod, a, b, flags: true }),
 
-        match inst.mnemoic {
-            Add => {
-                let (a_ops, dest, a) = encode_operand(inst.operands[0], &mut temps);
-                ops.extend(a_ops);
-                let (b_ops, _, b) = encode_operand(inst.operands[1], &mut temps);
-                ops.extend(b_ops);
+            Mov => {
+                // Prepare the source and destination locations.
+                let dest = self.encode_get_location(self.inst.operands[0]);
+                let src = self.encode_get_location(self.inst.operands[1]);
 
-                let sum = Temporary(a.0, temps);
-                assert_eq!(a.0, b.0, "incompatible data types for add");
-                ops.push(Op::Add { sum, a, b });
-                ops.push(Op::Mov { dest, src: Temp(sum) });
+                // Enforce that both operands have the exact same data type.
+                assert_eq!(src.data_type(), dest.data_type(), "incompatible data types for move");
+                self.ops.push(Op::Mov { dest, src });
             },
-            Sub => {},
-            Imul => {},
-            Mov => {},
-            Movzx => {},
-            Lea => {},
-            Push => {},
-            Pop => {},
-            Jmp => {},
-            Je => {},
-            Jg => {},
-            Call => {},
-            Leave => {},
-            Ret => {},
-            Cmp => {},
-            Test => {},
-            Set => {},
-            Syscall => { ops.push(Op::Syscall); },
+
+            Movzx => unimplemented!(),
+            Lea => unimplemented!(),
+            Push => unimplemented!(),
+            Pop => unimplemented!(),
+            Jmp => unimplemented!(),
+            Je => unimplemented!(),
+            Jg => unimplemented!(),
+            Call => unimplemented!(),
+            Leave => unimplemented!(),
+            Ret => unimplemented!(),
+            Cmp => unimplemented!(),
+            Test => unimplemented!(),
+            Set => unimplemented!(),
+
+            Syscall => { self.ops.push(Op::Syscall); },
             Nop => {},
+        };
+
+        Microcode { ops: self.ops }
+    }
+
+    /// Encode a binary operation like add or subtract.
+    fn encode_binop<F>(&mut self, bin_op: F)
+    where F: FnOnce(Temporary, Temporary, Temporary) -> MicroOperation {
+        // Encode the loading of both operands into a temporary.
+        let (dest_loc, dest) = self.encode_load_operand(self.inst.operands[0]);
+        let (src_loc, src) = self.encode_load_operand(self.inst.operands[1]);
+
+        // Enforce that both operands have the exact same data type.
+        assert_eq!(dest.0, src.0, "incompatible data types for binary operation");
+
+        // Encode the actual binary operation and the move from the target temporary
+        // into the destination.
+        let target = Temporary(src.0, self.temps);
+        self.ops.push(bin_op(target, dest, src));
+        self.ops.push(MicroOperation::Mov { dest: dest_loc, src: Location::Temp(target) });
+    }
+
+    /// Encode the micro operations to load the operand into a temporary.
+    fn encode_load_operand(&mut self, operand: Operand) -> (Location, Temporary) {
+        let location = self.encode_get_location(operand);
+        if let Location::Temp(temp) = location {
+            (location, temp)
+        } else {
+            let temp = Temporary(location.data_type(), self.temps);
+            self.ops.push(MicroOperation::Mov { dest: Location::Temp(temp), src: location });
+            self.temps += 1;
+            (location, temp)
         }
-
-        Microcode { ops }
     }
-}
 
-fn encode_operand(operand: Operand, temps: &mut usize)
-    -> (Vec<MicroOperation>, Location, Temporary) {
-    use Location::*;
-    use MicroOperation as Op;
-    use DataType::*;
+    /// Encode the micro operations to prepare the location of the operand.
+    /// The operand itself will not be loaded and the operations may be empty
+    /// if it is a direct operand.
+    fn encode_get_location(&mut self, operand: Operand) -> Location {
+        use {Location::*, DataType::*, MicroOperation as Op};
 
-    match operand {
-        // Load the register from register memory space into a temporary.
-        Operand::Direct(reg) => encode_load_reg(reg, temps, true),
-        Operand::Indirect(reg) => unimplemented!(),
+        match operand {
+            Operand::Direct(reg) => {
+                // Locate the registers in memory.
+                let data_type = DataType::from_width(reg.width(), false);
+                Direct(data_type, MemorySpace(1), reg_mem(reg))
+            },
 
-        // Load the value in main memory at address reg + offset into a temporary.
-        Operand::IndirectDisplaced(reg, offset) => {
-            let (mut ops, _, reg) = encode_load_reg(reg, temps, false);
+            Operand::Indirect(reg) => {
+                // Load the address into a temporary.
+                let reg = self.encode_load_reg(reg);
+                Indirect(U64, MemorySpace(0), reg) // FIXME: Don't assume U64
+            },
 
-            let constant = Temporary(U64, *temps);
-            ops.push(Op::Const { dest: Temp(constant), value: Immediate(U64, offset as u64) });
-            ops.push(Op::Add { sum: Temporary(U64, *temps + 1), a: reg, b: constant });
+            Operand::IndirectDisplaced(reg, displace) => {
+                // Load the base register into a temporary.
+                let reg = self.encode_load_reg(reg);
 
-            // FIXME: Don't assume I64, need more information in amd64 instructions.
-            let src = Indirect(I64, MemorySpace(0), Temporary(U64, *temps + 1));
-            let dest = Temporary(I64, *temps + 2);
-            ops.push(Op::Mov { dest: Temp(dest), src });
+                // Load the displacement constant into a temporary.
+                let constant = Temporary(U64, self.temps);
+                self.ops.push(Op::Const {
+                    dest: Location::Temp(constant),
+                    value: Immediate(U64, displace as u64)
+                });
 
-            *temps += 3;
-            (ops, src, dest)
-        },
+                // Compute the final address.
+                self.ops.push(Op::Add {
+                    sum: Temporary(U64, self.temps + 1),
+                    a: reg, b: constant, flags: false
+                });
+                self.temps += 2;
 
-        Operand::Immediate(value) => unimplemented!(),
-        Operand::Offset(offset) => unimplemented!(),
+                Indirect(U64, MemorySpace(0), Temporary(U64, self.temps - 1)) // FIXME: U64
+            },
+
+            Operand::Immediate(immediate) => Temp(self.encode_load_constant(immediate)),
+            Operand::Offset(offset) => Temp(self.encode_load_constant(offset as u64)),
+        }
     }
-}
 
-fn encode_load_reg(reg: Register, temps: &mut usize, signed: bool)
-    -> (Vec<MicroOperation>, Location, Temporary) {
+    /// Encode the micro operations to load a register from memory into a temporary.
+    /// The resulting temporary will have the data type matching the registers width.
+    fn encode_load_reg(&mut self, reg: Register) -> Temporary {
+        let data_type = DataType::from_width(reg.width(), false);
+        let temp = Temporary(data_type, self.temps);
 
-    let data_type = DataType::from_width(reg.width(), signed);
-    let src = Location::Direct(data_type, MemorySpace(1), reg_mem(reg));
-    let dest = Temporary(data_type, *temps);
-    let ops = vec![MicroOperation::Mov { dest: Location::Temp(dest), src }];
+        let src = Location::Direct(data_type, MemorySpace(1), reg_mem(reg));
+        self.ops.push(MicroOperation::Mov { dest: Location::Temp(temp), src });
+        self.temps += 1;
 
-    *temps += 1;
-    (ops, src, dest)
+        temp
+    }
+
+    /// Encode the micro operations to load a constant into a temporary.
+    fn encode_load_constant(&mut self, constant: u64) -> Temporary {
+        let temp = Temporary(DataType::U64, self.temps);
+
+        self.ops.push(MicroOperation::Const {
+            dest: Location::Temp(temp),
+            value: Immediate(DataType::U64, constant)
+        });
+        self.temps += 1;
+
+        temp
+    }
 }
 
 impl Display for Microcode {
@@ -115,16 +187,16 @@ impl Display for Microcode {
 /// Describes one atomic operation.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum MicroOperation {
-    /// Store the sum of `a` and `b` in `sum`.
-    Add { sum: Temporary, a: Temporary, b: Temporary },
-    /// Store the difference of `a` and `b` in `sum`.
-    Sub { difference: Temporary, a: Temporary, b: Temporary },
-    /// Store the product of `a` and `b` in `sum`.
-    Mul { product: Temporary, a: Temporary, b: Temporary },
-    /// Store the bitwise AND of `a` and `b` in and.
-    BitAnd { and: Temporary, a: Temporary, b: Temporary },
-    /// Store the bitwise OR of `a` and `b` in and.
-    BitOr { or: Temporary, a: Temporary, b: Temporary },
+    /// Store the sum of `a` and `b` in `sum`. Set flags if active.
+    Add { sum: Temporary, a: Temporary, b: Temporary, flags: bool },
+    /// Store the difference of `a` and `b` in `diff`. Set flags if active.
+    Sub { diff: Temporary, a: Temporary, b: Temporary, flags: bool },
+    /// Store the product of `a` and `b` in `prod`. Set flags if active.
+    Mul { prod: Temporary, a: Temporary, b: Temporary, flags: bool },
+    /// Store the bitwise AND of `a` and `b` in and. Set flags if active.
+    BitAnd { and: Temporary, a: Temporary, b: Temporary, flags: bool },
+    /// Store the bitwise OR of `a` and `b` in or. Set flags if active.
+    BitOr { or: Temporary, a: Temporary, b: Temporary, flags: bool },
     /// Store the value at location `src` in location `dest`.
     Mov { dest: Location, src: Location },
     /// Store a constant in location `dest`.
@@ -142,12 +214,13 @@ pub enum MicroOperation {
 impl Display for MicroOperation {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         use MicroOperation::*;
-        match self {
-            Add { sum, a, b } => write!(f, "add {} = {} + {}", sum, a, b),
-            Sub { difference, a, b } => write!(f, "sub {} = {} + {}", difference, a, b),
-            Mul { product, a, b } => write!(f, "mul {} = {} + {}", product, a, b),
-            BitAnd { and, a, b } => write!(f, "and {} = {} & {}", and, a, b),
-            BitOr { or, a, b } => write!(f, "or {} = {} | {}", or, a, b),
+        fn flag(flags: bool) -> &'static str { if flags { " (flags)" } else { "" } }
+        match *self {
+            Add { sum, a, b, flags } => write!(f, "add {} = {} + {}{}", sum, a, b, flag(flags)),
+            Sub { diff, a, b, flags } => write!(f, "sub {} = {} + {}{}", diff, a, b, flag(flags)),
+            Mul { prod, a, b, flags } => write!(f, "mul {} = {} + {}{}", prod, a, b, flag(flags)),
+            BitAnd { and, a, b, flags } => write!(f, "and {} = {} & {}{}", and, a, b, flag(flags)),
+            BitOr { or, a, b, flags } => write!(f, "or {} = {} | {}{}", or, a, b, flag(flags)),
             Mov { dest, src } => write!(f, "mov {} = {}", dest, src),
             Const { dest, value } => write!(f, "const {} = {}", dest, value),
             Cast { target, new } => write!(f, "cast {} to {}", target, new),
@@ -165,6 +238,17 @@ pub enum Location {
     Indirect(DataType, MemorySpace, Temporary),
 }
 
+impl Location {
+    fn data_type(&self) -> DataType {
+        use Location::*;
+        match *self {
+            Temp(temp) => temp.0,
+            Direct(data, _, _) => data,
+            Indirect(data, _, _) => data,
+        }
+    }
+}
+
 impl Display for Location {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         use Location::*;
@@ -178,8 +262,11 @@ impl Display for Location {
 
 /// Memory space identified by an index.
 ///
-/// Typically, index 0 is used for the flat primary memory space and
-/// index 1 for registers.
+/// Typically,
+/// - memory space `0` is used for the flat primary memory space
+/// - memory space `1` is used for registers (their addresses can be
+///   retrieve through the [`reg_mem`] function).
+/// - memory space `2` is used for flags.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct MemorySpace(pub usize);
 
@@ -275,7 +362,11 @@ mod test {
 
     fn test(instruction: Instruction, display: &str) {
         let code = Microcode::from_instruction(&instruction);
-        assert_eq!(code.to_string(), codify(display));
+        let display = codify(display);
+        println!("encoded: {}", code);
+        println!("display: {}", display);
+        println!();
+        assert_eq!(code.to_string(), display);
     }
 
     fn codify(code: &str) -> String {
@@ -301,13 +392,26 @@ mod test {
         // - Compute the sum of t0 and t4 and store it in t5
         // - Move t5 into r8
         test(Instruction::decode(&[0x4c, 0x03, 0x47, 0x0a]).unwrap(), "
-            mov T0:i64 = [mem1][0x40:i64]
+            mov T0:u64 = [mem1][0x40:u64]
             mov T1:u64 = [mem1][0x38:u64]
             const T2:u64 = 0xa:u64
             add T3:u64 = T1:u64 + T2:u64
-            mov T4:i64 = [mem0][(T3:u64):i64]
-            add T5:i64 = T0:i64 + T4:i64
-            mov [mem1][0x40:i64] = T5:i64
+            mov T4:u64 = [mem0][(T3:u64):u64]
+            add T5:u64 = T0:u64 + T4:u64 (flags)
+            mov [mem1][0x40:u64] = T5:u64
+        ");
+
+        // Instruction: mov esi, edx
+        test(Instruction::decode(&[0x89, 0xd6]).unwrap(),
+             "mov [mem1][0x30:u32] = [mem1][0x10:u32]");
+
+        // Instruction: mov [rbp-0x8], 0xa
+        test(Instruction::decode(&[0xc7, 0x45, 0xf8, 0x0a, 0x00, 0x00, 0x00]).unwrap(), "
+            mov T0:u64 = [mem1][0x28:u64]
+            const T1:u64 = 0xfffffffffffffff8:u64
+            add T2:u64 = T0:u64 + T1:u64
+            const T3:u64 = 0xa:u64
+            mov [mem0][(T2:u64):u64] = T3:u64
         ");
     }
 }

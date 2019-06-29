@@ -2,7 +2,7 @@
 
 #![allow(unused)]
 
-use std::fmt::{self, Debug, Display, Formatter};
+use std::fmt::{self, Display, Formatter};
 use crate::amd64::{Instruction, Mnemoic, DecodeResult};
 
 pub mod elf;
