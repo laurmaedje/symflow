@@ -37,22 +37,41 @@ impl<'a> Encoder<'a> {
         use MicroOperation as Op;
 
         match self.inst.mnemoic {
+            // Load both operands, perform an operation and write the result back.
             Add => self.encode_binop(|sum, a, b| Op::Add { sum, a, b, flags: true }),
             Sub => self.encode_binop(|diff, a, b| Op::Sub { diff, a, b, flags: true }),
             Imul => self.encode_binop(|prod, a, b| Op::Mul { prod, a, b, flags: true }),
 
+            // Retrieve both locations and move from source to destination.
             Mov => {
-                // Prepare the source and destination locations.
+                let dest = self.encode_get_location(self.inst.operands[0]);
+                let src = self.encode_get_location(self.inst.operands[1]);
+                self.encode_move(dest, src);
+            },
+
+            // Load the source, cast it to the destination type and move it there.
+            Movzx => {
+                let dest = self.encode_get_location(self.inst.operands[0]);
+                let (src, mut temp) = self.encode_load_operand(self.inst.operands[1]);
+                let new = dest.data_type();
+                self.ops.push(Op::Cast { target: temp, new });
+                temp.0 = new;
+                self.encode_move(dest, Location::Temp(temp));
+            },
+
+            // Retrieve both locations, but instead of loading just move the
+            // address into the destination.
+            Lea => {
                 let dest = self.encode_get_location(self.inst.operands[0]);
                 let src = self.encode_get_location(self.inst.operands[1]);
 
-                // Enforce that both operands have the exact same data type.
-                assert_eq!(src.data_type(), dest.data_type(), "incompatible data types for move");
-                self.ops.push(Op::Mov { dest, src });
+                if let Location::Indirect(_, _, temp) = src {
+                    self.encode_move(dest, Location::Temp(temp));
+                } else {
+                    panic!("invalid source for lea");
+                }
             },
 
-            Movzx => unimplemented!(),
-            Lea => unimplemented!(),
             Push => unimplemented!(),
             Pop => unimplemented!(),
             Jmp => unimplemented!(),
@@ -76,17 +95,17 @@ impl<'a> Encoder<'a> {
     fn encode_binop<F>(&mut self, bin_op: F)
     where F: FnOnce(Temporary, Temporary, Temporary) -> MicroOperation {
         // Encode the loading of both operands into a temporary.
-        let (dest_loc, dest) = self.encode_load_operand(self.inst.operands[0]);
-        let (src_loc, src) = self.encode_load_operand(self.inst.operands[1]);
+        let (dest, left) = self.encode_load_operand(self.inst.operands[0]);
+        let (_, right) = self.encode_load_operand(self.inst.operands[1]);
 
         // Enforce that both operands have the exact same data type.
-        assert_eq!(dest.0, src.0, "incompatible data types for binary operation");
+        assert_eq!(left.0, right.0, "incompatible data types for binary operation");
 
         // Encode the actual binary operation and the move from the target temporary
         // into the destination.
-        let target = Temporary(src.0, self.temps);
-        self.ops.push(bin_op(target, dest, src));
-        self.ops.push(MicroOperation::Mov { dest: dest_loc, src: Location::Temp(target) });
+        let target = Temporary(left.0, self.temps);
+        self.ops.push(bin_op(target, left, right));
+        self.ops.push(MicroOperation::Mov { dest, src: Location::Temp(target) });
     }
 
     /// Encode the micro operations to load the operand into a temporary.
@@ -106,7 +125,7 @@ impl<'a> Encoder<'a> {
     /// The operand itself will not be loaded and the operations may be empty
     /// if it is a direct operand.
     fn encode_get_location(&mut self, operand: Operand) -> Location {
-        use {Location::*, DataType::*, MicroOperation as Op};
+        use {Location::*, DataType::*};
 
         match operand {
             Operand::Direct(reg) => {
@@ -125,15 +144,16 @@ impl<'a> Encoder<'a> {
                 // Load the base register into a temporary.
                 let reg = self.encode_load_reg(reg);
 
+                // FIXME: Address does not have to be U64.
                 // Load the displacement constant into a temporary.
                 let constant = Temporary(U64, self.temps);
-                self.ops.push(Op::Const {
+                self.ops.push(MicroOperation::Const {
                     dest: Location::Temp(constant),
                     value: Immediate(U64, displace as u64)
                 });
 
                 // Compute the final address.
-                self.ops.push(Op::Add {
+                self.ops.push(MicroOperation::Add {
                     sum: Temporary(U64, self.temps + 1),
                     a: reg, b: constant, flags: false
                 });
@@ -171,6 +191,13 @@ impl<'a> Encoder<'a> {
         self.temps += 1;
 
         temp
+    }
+
+    /// Encode a move operation with check for matching data types.
+    fn encode_move(&mut self, dest: Location, src: Location) {
+        // Enforce that both operands have the exact same data type.
+        assert_eq!(src.data_type(), dest.data_type(), "incompatible data types for move");
+        self.ops.push(MicroOperation::Mov { dest, src });
     }
 }
 
@@ -360,7 +387,8 @@ mod test {
     use crate::amd64::*;
     use super::*;
 
-    fn test(instruction: Instruction, display: &str) {
+    fn test(bytes: &[u8], display: &str) {
+        let instruction = Instruction::decode(bytes).unwrap();
         let code = Microcode::from_instruction(&instruction);
         let display = codify(display);
         println!("encoded: {}", code);
@@ -391,7 +419,7 @@ mod test {
         // - Load the value at address t3 into t4
         // - Compute the sum of t0 and t4 and store it in t5
         // - Move t5 into r8
-        test(Instruction::decode(&[0x4c, 0x03, 0x47, 0x0a]).unwrap(), "
+        test(&[0x4c, 0x03, 0x47, 0x0a], "
             mov T0:u64 = [mem1][0x40:u64]
             mov T1:u64 = [mem1][0x38:u64]
             const T2:u64 = 0xa:u64
@@ -402,16 +430,30 @@ mod test {
         ");
 
         // Instruction: mov esi, edx
-        test(Instruction::decode(&[0x89, 0xd6]).unwrap(),
-             "mov [mem1][0x30:u32] = [mem1][0x10:u32]");
+        test(&[0x89, 0xd6], "mov [mem1][0x30:u32] = [mem1][0x10:u32]");
 
         // Instruction: mov [rbp-0x8], 0xa
-        test(Instruction::decode(&[0xc7, 0x45, 0xf8, 0x0a, 0x00, 0x00, 0x00]).unwrap(), "
+        test(&[0xc7, 0x45, 0xf8, 0x0a, 0x00, 0x00, 0x00], "
             mov T0:u64 = [mem1][0x28:u64]
             const T1:u64 = 0xfffffffffffffff8:u64
             add T2:u64 = T0:u64 + T1:u64
             const T3:u64 = 0xa:u64
             mov [mem0][(T2:u64):u64] = T3:u64
+        ");
+
+        // Instruction: lea rax, [rbp-0xc]
+        test(&[0x48, 0x8d, 0x45, 0xf4], "
+            mov T0:u64 = [mem1][0x28:u64]
+            const T1:u64 = 0xfffffffffffffff4:u64
+            add T2:u64 = T0:u64 + T1:u64
+            mov [mem1][0x0:u64] = T2:u64
+        ");
+
+        // Instruction: movzx eax, al
+        test(&[0x0f, 0xb6, 0xc0], "
+            mov T0:u8 = [mem1][0x0:u8]
+            cast T0:u8 to u32
+            mov [mem1][0x0:u32] = T0:u32
         ");
     }
 }
