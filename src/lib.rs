@@ -2,8 +2,9 @@
 
 #![allow(unused)]
 
-use std::fmt::{self, Display, Formatter};
-use crate::amd64::{Instruction, Mnemoic, DecodeResult};
+use std::fmt::{self, Display, Debug, Formatter};
+use crate::amd64::{Instruction, Mnemoic, DecodeError, DecodeResult};
+use crate::ir::{Microcode, EncodeError};
 
 pub mod elf;
 pub mod amd64;
@@ -24,14 +25,15 @@ impl<'a> Code<'a> {
     }
 
     /// Disassemble the whole code.
-    pub fn disassemble_all(&self) -> DecodeResult<Block> {
+    pub fn disassemble_all(&self) -> DisassembleResult<Block> {
         let mut instructions = Vec::new();
 
         let mut addr = self.base;
         while addr - self.base < self.code.len() as u64 {
             let inst = self.disassemble_instruction(addr)?;
             let len = inst.bytes.len() as u64;
-            instructions.push((addr, inst));
+            let microcode = Microcode::from_instruction(&inst)?;
+            instructions.push((addr, inst, microcode));
             addr += len;
         }
 
@@ -39,20 +41,21 @@ impl<'a> Code<'a> {
     }
 
     /// Disassemble a basic block at an address.
-    pub fn disassemble_block(&self, mut addr: u64) -> DecodeResult<Block> {
+    pub fn disassemble_block(&self, mut addr: u64) -> DisassembleResult<Block> {
         let mut instructions = Vec::new();
 
         let mut finished = false;
         while !finished && addr - self.base < self.code.len() as u64 {
             let inst = self.disassemble_instruction(addr)?;
-            let len = inst.bytes.len() as u64;
 
             // If this is a `ret` instruction, the block is ended.
             if inst.mnemoic == Mnemoic::Ret {
                 finished = true;
             }
 
-            instructions.push((addr, inst));
+            let len = inst.bytes.len() as u64;
+            let microcode = Microcode::from_instruction(&inst)?;
+            instructions.push((addr, inst, microcode));
             addr += len;
         }
 
@@ -70,16 +73,68 @@ impl<'a> Code<'a> {
 /// Block of machine code instructions.
 #[derive(Debug, Clone)]
 pub struct Block {
-    pub instructions: Vec<(u64, Instruction)>,
+    pub instructions: Vec<(u64, Instruction, Microcode)>,
 }
 
 impl Display for Block {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        writeln!(f, "Block [")?;
-        for (addr, instruction) in &self.instructions {
-            writeln!(f, "    {:x}:  {}", addr, instruction)?;
+        write!(f, "Block [")?;
+        if !self.instructions.is_empty() {
+            writeln!(f)?;
+        }
+        let mut start = true;
+        for (addr, instruction, microcode) in &self.instructions {
+            if !start {
+                writeln!(f)?;
+            }
+            start = false;
+            writeln!(f, "    {:x}: {}", addr, instruction)?;
+            for line in microcode.to_string().lines() {
+                if !line.starts_with("Microcode") && line != "]" {
+                    writeln!(f, "         | {}", &line[4..])?;
+                }
+            }
         }
         write!(f, "]")
+    }
+}
+
+/// Error type for disassembling.
+#[derive(Eq, PartialEq)]
+pub enum DisassembleError {
+    Decode(DecodeError),
+    Encode(EncodeError),
+}
+
+/// Result type for disassembling.
+type DisassembleResult<T> = Result<T, DisassembleError>;
+impl std::error::Error for DisassembleError {}
+
+impl Display for DisassembleError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        use DisassembleError::*;
+        match self {
+            Decode(err) => write!(f, "Decoding error: {}", err),
+            Encode(err) => write!(f, "Encoding error: {}", err),
+        }
+    }
+}
+
+impl Debug for DisassembleError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+impl From<DecodeError> for DisassembleError {
+    fn from(err: DecodeError) -> DisassembleError {
+        DisassembleError::Decode(err)
+    }
+}
+
+impl From<EncodeError> for DisassembleError {
+    fn from(err: EncodeError) -> DisassembleError {
+        DisassembleError::Encode(err)
     }
 }
 
@@ -99,5 +154,6 @@ mod tests {
         // Disassemble the whole code and print it.
         let code = Code::new(text.header.addr, &text.data);
         let all = code.disassemble_all().unwrap();
+        println!("{}", all);
     }
 }

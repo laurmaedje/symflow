@@ -5,7 +5,7 @@ use byteorder::{ByteOrder, LittleEndian};
 
 
 /// Decoded machine code instruction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Instruction {
     pub bytes: Vec<u8>,
     pub mnemoic: Mnemoic,
@@ -46,7 +46,7 @@ impl<'a> Decoder<'a> {
 
         // Parse the opcode.
         let (opcode, operation) = self.decode_opcode(rex);
-        let (mnemoic, op) = operation.ok_or_else(|| DecodeError { bytes: self.bytes.to_vec() })?;
+        let (mnemoic, op) = operation.ok_or_else(|| DecodeError::new(self.bytes.to_vec()))?;
 
         // Construct the operands.
         let mut operands = Vec::new();
@@ -62,7 +62,7 @@ impl<'a> Decoder<'a> {
 
             // Parse the immediate.
             let immediate = self.decode_immediate(im_w);
-            operands.push(Operand::Immediate(immediate));
+            operands.push(Operand::Immediate(im_w, immediate));
 
         } else if let Rm(rm_w) = op {
             // Parse just the R/M part and add a direct operand with it.
@@ -93,7 +93,7 @@ impl<'a> Decoder<'a> {
 
             // Construct and insert the operands.
             operands.push(construct_modrm_rm(rex.b, rm, rm_w, displace));
-            operands.push(Operand::Immediate(immediate));
+            operands.push(Operand::Immediate(im_w, immediate));
 
         } else if let Rel(width) = op {
             // Parse the relative offset and adjust it by the length of this instruction.
@@ -170,7 +170,7 @@ impl<'a> Decoder<'a> {
             &[0x83] if ext == Some(7) => (Mnemoic::Cmp, RmIm(scaled, Bits8)),
             &[0x3b] => (Mnemoic::Cmp, RegRm(scaled, scaled, true)),
             &[0x85] => (Mnemoic::Test, RegRm(scaled, scaled, true)),
-            &[0x0f, 0x9c] => (Mnemoic::Set, Rm(Bits8)),
+            &[0x0f, 0x9c] => (Mnemoic::Setl, Rm(Bits8)),
 
             &[0x7f] =>(Mnemoic::Jg, Rel(Bits8)),
             &[0x74] =>(Mnemoic::Je, Rel(Bits8)),
@@ -279,8 +279,8 @@ fn construct_modrm_rm(rex_b: bool, rm: u8, reg_w: DataWidth, displace: Option<i6
     let direct = Register::from_bits(rex_b, rm, reg_w);
     let indirect = Register::from_bits(rex_b, rm, DataWidth::Bits64);
     match displace {
-        Some(0) => Operand::Indirect(indirect),
-        Some(offset) => Operand::IndirectDisplaced(indirect, offset),
+        Some(0) => Operand::Indirect(reg_w, indirect),
+        Some(offset) => Operand::IndirectDisplaced(reg_w, indirect, offset),
         None => Operand::Direct(direct),
     }
 }
@@ -305,7 +305,7 @@ pub enum Mnemoic {
     Mov, Movzx, Lea,
     Push, Pop,
     Jmp, Je, Jg, Call, Leave, Ret,
-    Cmp, Test, Set,
+    Cmp, Test, Setl,
     Syscall,
     Nop,
 }
@@ -317,12 +317,12 @@ impl Display for Mnemoic {
 }
 
 /// Operand in an instruction.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Operand {
     Direct(Register),
-    Indirect(Register),
-    IndirectDisplaced(Register, i64),
-    Immediate(u64),
+    Indirect(DataWidth, Register),
+    IndirectDisplaced(DataWidth, Register, i64),
+    Immediate(DataWidth, u64),
     Offset(i64),
 }
 
@@ -331,19 +331,29 @@ impl Display for Operand {
         use Operand::*;
         match self {
             Direct(reg) => write!(f, "{}", reg),
-            Indirect(reg) => write!(f, "[{}]", reg),
-            IndirectDisplaced(reg, offset) => if *offset >= 0 {
-                write!(f, "[{}+0x{:x}]", reg, offset)
+            Indirect(width, reg) => write!(f, "{} [{}]", width_name(*width), reg),
+            IndirectDisplaced(width, reg, offset) => if *offset >= 0 {
+                write!(f, "{} [{}+{:#x}]", width_name(*width), reg, offset)
             } else {
-                write!(f, "[{}-0x{:x}]", reg, -offset)
+                write!(f, "{} [{}-{:#x}]", width_name(*width), reg, -offset)
             },
-            Immediate(value) => write!(f, "0x{:x}", value),
+            Immediate(_, value) => write!(f, "{:#x}", value),
             Offset(offset) => if *offset >= 0 {
-                write!(f, "+0x{:x}", offset)
+                write!(f, "+{:#x}", offset)
             } else {
-                write!(f, "-0x{:x}", -offset)
+                write!(f, "-{:#x}", -offset)
             }
         }
+    }
+}
+
+/// The name for a byte width of an indirect operand.
+fn width_name(width: DataWidth) -> &'static str {
+    match width {
+        DataWidth::Bits8 => "byte ptr",
+        DataWidth::Bits16 => "word ptr",
+        DataWidth::Bits32 => "dword ptr",
+        DataWidth::Bits64 => "qword ptr",
     }
 }
 
@@ -355,6 +365,7 @@ pub enum Register {
     AX, CX, DX, BX, SP, BP, SI, DI,
     AL, CL, DL, BL, AH, CH, DH, BH,
     R8, R9, R10, R11, R12, R13, R14, R15,
+    IP, EIP, RIP,
 }
 
 impl Display for Register {
@@ -369,9 +380,9 @@ impl Register {
         use Register::*;
         match self {
             RAX | RCX | RDX | RBX | RSP | RBP | RSI | RDI |
-            R8 | R9 | R10 | R11 | R12 | R13 | R14 | R15 => DataWidth::Bits64,
-            EAX | ECX | EDX | EBX | ESP | EBP | ESI | EDI => DataWidth::Bits32,
-            AX | CX | DX | BX | SP | BP | SI | DI => DataWidth::Bits16,
+            R8 | R9 | R10 | R11 | R12 | R13 | R14 | R15 | RIP => DataWidth::Bits64,
+            EAX | ECX | EDX | EBX | ESP | EBP | ESI | EDI | EIP => DataWidth::Bits32,
+            AX | CX | DX | BX | SP | BP | SI | DI | IP => DataWidth::Bits16,
             AL | CL | DL | BL | AH | CH | DH | BH => DataWidth::Bits8,
         }
     }
@@ -401,6 +412,17 @@ impl Register {
     }
 }
 
+/// CPU flags.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum Flag {
+    Carry,
+    Parity,
+    Adjust,
+    Zero,
+    Sign,
+    Overflow,
+}
+
 /// Width of data in bits.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum DataWidth {
@@ -412,7 +434,7 @@ pub enum DataWidth {
 
 impl DataWidth {
     /// The number of bytes this width equals.
-    fn bytes(&self) -> usize {
+    pub fn bytes(&self) -> usize {
         match self {
             DataWidth::Bits8 => 1,
             DataWidth::Bits16 => 2,
@@ -428,13 +450,20 @@ pub struct DecodeError {
     pub bytes: Vec<u8>,
 }
 
+impl DecodeError {
+    /// Create a new decoding error from bytes.
+    fn new(bytes: Vec<u8>) -> DecodeError {
+        DecodeError { bytes }
+    }
+}
+
 /// Result type for instruction decoding.
 pub(in super) type DecodeResult<T> = Result<T, DecodeError>;
 impl std::error::Error for DecodeError {}
 
 impl Display for DecodeError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Decode error: failed to decode instruction {:02x?}", self.bytes)
+        write!(f, "Failed to decode instruction bytes {:02x?}.", self.bytes)
     }
 }
 
@@ -456,39 +485,39 @@ mod tests {
 
     #[test]
     fn decode() {
-        test(&[0x4c, 0x03, 0x47, 0x0a], "add r8, [rdi+0xa]");
+        test(&[0x4c, 0x03, 0x47, 0x0a], "add r8, qword ptr [rdi+0xa]");
 
         test(&[0x55], "push rbp");
         test(&[0x48, 0x89, 0xe5], "mov rbp, rsp");
-        test(&[0x89, 0x7d, 0xfc], "mov [rbp-0x4], edi");
-        test(&[0x89, 0x75, 0xf8], "mov [rbp-0x8], esi");
-        test(&[0x8b, 0x45, 0xfc], "mov eax, [rbp-0x4]");
-        test(&[0x3b, 0x45, 0xf8], "cmp eax, [rbp-0x8]");
-        test(&[0x0f, 0x9c, 0xc0], "set al");
+        test(&[0x89, 0x7d, 0xfc], "mov dword ptr [rbp-0x4], edi");
+        test(&[0x89, 0x75, 0xf8], "mov dword ptr [rbp-0x8], esi");
+        test(&[0x8b, 0x45, 0xfc], "mov eax, dword ptr [rbp-0x4]");
+        test(&[0x3b, 0x45, 0xf8], "cmp eax, dword ptr [rbp-0x8]");
+        test(&[0x0f, 0x9c, 0xc0], "setl al");
         test(&[0x0f, 0xb6, 0xc0], "movzx eax, al");
         test(&[0x5d], "pop rbp");
         test(&[0xc3], "ret");
 
-        test(&[0x48, 0x89, 0x7d, 0xf8], "mov [rbp-0x8], rdi");
-        test(&[0x48, 0x8b, 0x45, 0xf8], "mov rax, [rbp-0x8]");
-        test(&[0xc7, 0x00, 0xef, 0xbe, 0xad, 0xde], "mov [rax], 0xdeadbeef");
+        test(&[0x48, 0x89, 0x7d, 0xf8], "mov qword ptr [rbp-0x8], rdi");
+        test(&[0x48, 0x8b, 0x45, 0xf8], "mov rax, qword ptr [rbp-0x8]");
+        test(&[0xc7, 0x00, 0xef, 0xbe, 0xad, 0xde], "mov dword ptr [rax], 0xdeadbeef");
         test(&[0x90], "nop");
 
-        test(&[0xc7, 0x00, 0xad, 0xde, 0xef, 0xbe], "mov [rax], 0xbeefdead");
+        test(&[0xc7, 0x00, 0xad, 0xde, 0xef, 0xbe], "mov dword ptr [rax], 0xbeefdead");
         test(&[0x48, 0x83, 0xec, 0x10], "sub rsp, 0x10");
-        test(&[0xc7, 0x45, 0xf8, 0x0a, 0x00, 0x00, 0x00], "mov [rbp-0x8], 0xa");
-        test(&[0x83, 0x7d, 0xf8, 0x04], "cmp [rbp-0x8], 0x4");
+        test(&[0xc7, 0x45, 0xf8, 0x0a, 0x00, 0x00, 0x00], "mov dword ptr [rbp-0x8], 0xa");
+        test(&[0x83, 0x7d, 0xf8, 0x04], "cmp dword ptr [rbp-0x8], 0x4");
         test(&[0x7f, 0x09], "jg +0xb");
-        test(&[0xc7, 0x45, 0xfc, 0x0f, 0x00, 0x00, 0x00], "mov [rbp-0x4], 0xf");
+        test(&[0xc7, 0x45, 0xfc, 0x0f, 0x00, 0x00, 0x00], "mov dword ptr [rbp-0x4], 0xf");
         test(&[0xeb, 0x07], "jmp +0x9");
-        test(&[0xc7, 0x45, 0xfc, 0x05, 0x00, 0x00, 0x00], "mov [rbp-0x4], 0x5");
-        test(&[0x8b, 0x55, 0xfc], "mov edx, [rbp-0x4]");
+        test(&[0xc7, 0x45, 0xfc, 0x05, 0x00, 0x00, 0x00], "mov dword ptr [rbp-0x4], 0x5");
+        test(&[0x8b, 0x55, 0xfc], "mov edx, dword ptr [rbp-0x4]");
         test(&[0x89, 0xd6], "mov esi, edx");
         test(&[0x89, 0xc7], "mov edi, eax");
         test(&[0xe8, 0x8a, 0xff, 0xff, 0xff], "call -0x71");
         test(&[0x85, 0xc0], "test eax, eax");
         test(&[0x74, 0x0e], "je +0x10");
-        test(&[0x48, 0x8d, 0x45, 0xf4], "lea rax, [rbp-0xc]");
+        test(&[0x48, 0x8d, 0x45, 0xf4], "lea rax, qword ptr [rbp-0xc]");
         test(&[0x48, 0x89, 0xc7], "mov rdi, rax");
 
         test(&[0xe8, 0x92, 0xff, 0xff, 0xff], "call -0x69");
@@ -503,7 +532,7 @@ mod tests {
         test(&[0x0f, 0x05], "syscall");
 
         test(&[0x01, 0xd0], "add eax, edx");
-        test(&[0x0f, 0xaf, 0x45, 0xfc], "imul eax, [rbp-0x4]");
+        test(&[0x0f, 0xaf, 0x45, 0xfc], "imul eax, dword ptr [rbp-0x4]");
 
         assert_eq!(Instruction::decode(&[0x12, 0x34]).unwrap_err(),
                    DecodeError { bytes: vec![0x12, 0x34] });

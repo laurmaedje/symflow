@@ -1,7 +1,7 @@
-//! Intermediate representation of instructions.
+//! Microcode representation of instructions.
 
 use std::fmt::{self, Debug, Display, Formatter};
-use crate::amd64::{Instruction, Mnemoic, Operand, Register, DataWidth};
+use crate::amd64::{Instruction, Mnemoic, Operand, Register, Flag, DataWidth};
 
 
 /// Microcode composed of any number of micro operations.
@@ -12,7 +12,7 @@ pub struct Microcode {
 
 impl Microcode {
     /// Express the given instruction in microcode.
-    fn from_instruction(instruction: &Instruction) -> Microcode {
+    pub fn from_instruction(instruction: &Instruction) -> EncodeResult<Microcode> {
         Encoder::new(instruction).encode()
     }
 }
@@ -32,85 +32,186 @@ impl<'a> Encoder<'a> {
     }
 
     /// Encode the instruction into microcode.
-    fn encode(mut self) -> Microcode {
-        use Mnemoic::*;
-        use MicroOperation as Op;
+    fn encode(mut self) -> EncodeResult<Microcode> {
+        use {Mnemoic::*, DataType::*, MicroOperation as Op};
 
         match self.inst.mnemoic {
             // Load both operands, perform an operation and write the result back.
-            Add => self.encode_binop(|sum, a, b| Op::Add { sum, a, b, flags: true }),
-            Sub => self.encode_binop(|diff, a, b| Op::Sub { diff, a, b, flags: true }),
-            Imul => self.encode_binop(|prod, a, b| Op::Mul { prod, a, b, flags: true }),
+            Add => self.encode_binop(|sum, a, b| Op::Add { sum, a, b, flags: true }, true),
+            Sub => self.encode_binop(|diff, a, b| Op::Sub { diff, a, b, flags: true }, true),
+            Imul => self.encode_binop(|prod, a, b| Op::Mul { prod, a, b, flags: true }, true),
 
             // Retrieve both locations and move from source to destination.
             Mov => {
-                let dest = self.encode_get_location(self.inst.operands[0]);
-                let src = self.encode_get_location(self.inst.operands[1]);
-                self.encode_move(dest, src);
+                let dest = self.encode_get_location(self.inst.operands[0], true);
+                let src = self.encode_get_location(self.inst.operands[1], true);
+                if dest.data_type() != src.data_type() {
+                    self.ops.clear();
+                    self.temps = 0;
+                    self.encode_move_casted(true);
+                } else {
+                    self.encode_move(dest, src)?;
+                }
             },
 
             // Load the source, cast it to the destination type and move it there.
-            Movzx => {
-                let dest = self.encode_get_location(self.inst.operands[0]);
-                let (src, mut temp) = self.encode_load_operand(self.inst.operands[1]);
-                let new = dest.data_type();
-                self.ops.push(Op::Cast { target: temp, new });
-                temp.0 = new;
-                self.encode_move(dest, Location::Temp(temp));
-            },
+            Movzx => self.encode_move_casted(false),
 
             // Retrieve both locations, but instead of loading just move the
             // address into the destination.
             Lea => {
-                let dest = self.encode_get_location(self.inst.operands[0]);
-                let src = self.encode_get_location(self.inst.operands[1]);
+                let dest = self.encode_get_location(self.inst.operands[0], false);
+                let src = self.encode_get_location(self.inst.operands[1], true);
 
                 if let Location::Indirect(_, _, temp) = src {
-                    self.encode_move(dest, Location::Temp(temp));
+                    self.encode_move(dest, Location::Temp(temp))?;
                 } else {
-                    panic!("invalid source for lea");
+                    panic!("encode: invalid source for lea");
                 }
             },
 
-            Push => unimplemented!(),
-            Pop => unimplemented!(),
-            Jmp => unimplemented!(),
-            Je => unimplemented!(),
-            Jg => unimplemented!(),
-            Call => unimplemented!(),
-            Leave => unimplemented!(),
-            Ret => unimplemented!(),
-            Cmp => unimplemented!(),
-            Test => unimplemented!(),
-            Set => unimplemented!(),
+            // Store or load data on the stack and adjust the stack pointer.
+            Push => {
+                let src = self.encode_get_location(self.inst.operands[0], true);
+                self.encode_push(src);
+            },
+            Pop => {
+                let dest = self.encode_get_location(self.inst.operands[0], true);
+                self.encode_pop(dest);
+            },
+
+            // Jump to the first operand under specific conditions.
+            Jmp => self.encode_jump(Condition::Always),
+            Je => self.encode_jump(Condition::Equal),
+            Jg => self.encode_jump(Condition::Greater),
+
+            // Save the procedure linking information on the stack and jump.
+            Call => {
+                let rip = self.encode_get_location(Operand::Direct(Register::RIP), false);
+                self.encode_push(rip);
+                self.encode_jump(Condition::Always);
+            },
+
+            // Copies the base pointer into the stack pointer register and pops the
+            // old base pointer from the stack.
+            Leave => {
+                let rbp = self.encode_get_location(Operand::Direct(Register::RBP), false);
+                let rsp = self.encode_get_location(Operand::Direct(Register::RSP), false);
+                self.encode_move(rsp, rbp).unwrap();
+                self.encode_pop(rbp);
+            },
+
+            // Jumps back to the address located on top of the stack.
+            Ret => {
+                let target = Temporary(U64, self.temps);
+                self.temps += 1;
+                self.encode_pop(Location::Temp(target));
+                self.ops.push(Op::Jump { target, condition: Condition::Always, relative: false });
+            },
+
+            Cmp => self.encode_binop(|diff, a, b| Op::Sub { diff, a, b, flags: true }, false),
+            Test => self.encode_binop(|and, a, b| Op::And { and, a, b, flags: true }, false),
+            Setl => self.encode_set(Condition::Less),
 
             Syscall => { self.ops.push(Op::Syscall); },
             Nop => {},
         };
 
-        Microcode { ops: self.ops }
+        Ok(Microcode { ops: self.ops })
     }
 
     /// Encode a binary operation like add or subtract.
-    fn encode_binop<F>(&mut self, bin_op: F)
+    fn encode_binop<F>(&mut self, bin_op: F, store: bool)
     where F: FnOnce(Temporary, Temporary, Temporary) -> MicroOperation {
         // Encode the loading of both operands into a temporary.
-        let (dest, left) = self.encode_load_operand(self.inst.operands[0]);
-        let (_, right) = self.encode_load_operand(self.inst.operands[1]);
+        let (dest, left) = self.encode_load_operand(self.inst.operands[0], true);
+        let (_, mut right) = self.encode_load_operand(self.inst.operands[1], true);
 
         // Enforce that both operands have the exact same data type.
-        assert_eq!(left.0, right.0, "incompatible data types for binary operation");
+        if left.0 != right.0 {
+            self.ops.push(MicroOperation::Cast { target: right, new: left.0 });
+            right.0 = left.0;
+        }
 
         // Encode the actual binary operation and the move from the target temporary
         // into the destination.
         let target = Temporary(left.0, self.temps);
+        self.temps += 1;
         self.ops.push(bin_op(target, left, right));
-        self.ops.push(MicroOperation::Mov { dest, src: Location::Temp(target) });
+        if store {
+            self.ops.push(MicroOperation::Mov { dest, src: Location::Temp(target) });
+        }
+    }
+
+    /// Encode a relative jump.
+    fn encode_jump(&mut self, condition: Condition) {
+        if let Operand::Offset(offset) = self.inst.operands[0] {
+            let target = Temporary(DataType::I64, self.temps);
+            let value = Immediate(DataType::I64, offset as u64);
+            self.ops.push(MicroOperation::Const { dest: Location::Temp(target), value });
+            self.ops.push(MicroOperation::Jump { target, condition, relative: true });
+            self.temps += 1;
+        } else {
+            panic!("encode_jump: invalid operand for jump");
+        }
+    }
+
+    /// Encode a set instruction.
+    fn encode_set(&mut self, condition: Condition) {
+        let location = self.encode_get_location(self.inst.operands[0], false);
+        let temp = Temporary(location.data_type(), self.temps);
+        self.temps += 1;
+        self.ops.push(MicroOperation::Set { target: temp, condition });
+        self.encode_move(location, Location::Temp(temp)).unwrap();
+    }
+
+    /// Load the stack pointer, decrement it by the operand size, store the
+    /// operand on the stack and store the new stack pointer in the register.
+    fn encode_push(&mut self, src: Location) {
+        let (sp, stack) = self.encode_load_operand(Operand::Direct(Register::RSP), false);
+        let data_type = src.data_type();
+
+        let offset = Temporary(DataType::U64, self.temps);
+        let value = Immediate(DataType::U64, data_type.width().bytes() as u64);
+        self.ops.push(MicroOperation::Const { dest: Location::Temp(offset), value });
+        self.ops.push(MicroOperation::Sub { diff: stack, a: stack, b: offset, flags: false });
+        self.temps += 1;
+
+        let stack_space = Location::Indirect(data_type, MemorySpace(0), stack);
+        self.encode_move(stack_space, src).unwrap();
+        self.encode_move(sp, Location::Temp(stack)).unwrap();
+    }
+
+    /// Load the operand from the stack, load the stack pointer, increment it
+    /// by the operand size and store the new stack pointer in the register.
+    fn encode_pop(&mut self, dest: Location) {
+        let (sp, stack) = self.encode_load_operand(Operand::Direct(Register::RSP), false);
+        let data_type = dest.data_type();
+
+        let stack_space = Location::Indirect(data_type, MemorySpace(0), stack);
+        self.encode_move(dest, stack_space).unwrap();
+
+        let offset = Temporary(DataType::U64, self.temps);
+        let value = Immediate(DataType::U64, data_type.width().bytes() as u64);
+        self.ops.push(MicroOperation::Const { dest: Location::Temp(offset), value });
+        self.ops.push(MicroOperation::Add { sum: stack, a: stack, b: offset, flags: false });
+        self.temps += 1;
+        self.encode_move(sp, Location::Temp(stack)).unwrap();
+    }
+
+    /// Encode moving with a cast to the destination source type.
+    fn encode_move_casted(&mut self, signed: bool) {
+        let dest = self.encode_get_location(self.inst.operands[0], signed);
+        let (_, mut temp) = self.encode_load_operand(self.inst.operands[1], signed);
+        let new = dest.data_type();
+        self.ops.push(MicroOperation::Cast { target: temp, new });
+        temp.0 = new;
+        self.encode_move(dest, Location::Temp(temp)).unwrap();
     }
 
     /// Encode the micro operations to load the operand into a temporary.
-    fn encode_load_operand(&mut self, operand: Operand) -> (Location, Temporary) {
-        let location = self.encode_get_location(operand);
+    fn encode_load_operand(&mut self, operand: Operand, signed: bool) -> (Location, Temporary) {
+        let location = self.encode_get_location(operand, signed);
         if let Location::Temp(temp) = location {
             (location, temp)
         } else {
@@ -124,27 +225,27 @@ impl<'a> Encoder<'a> {
     /// Encode the micro operations to prepare the location of the operand.
     /// The operand itself will not be loaded and the operations may be empty
     /// if it is a direct operand.
-    fn encode_get_location(&mut self, operand: Operand) -> Location {
+    fn encode_get_location(&mut self, operand: Operand, signed: bool) -> Location {
         use {Location::*, DataType::*};
 
         match operand {
             Operand::Direct(reg) => {
                 // Locate the registers in memory.
-                let data_type = DataType::from_width(reg.width(), false);
+                let data_type = DataType::from_width(reg.width(), signed);
                 Direct(data_type, MemorySpace(1), reg_mem(reg))
             },
 
-            Operand::Indirect(reg) => {
+            Operand::Indirect(width, reg) => {
                 // Load the address into a temporary.
-                let reg = self.encode_load_reg(reg);
-                Indirect(U64, MemorySpace(0), reg) // FIXME: Don't assume U64
+                let reg = self.encode_load_reg(reg, false);
+                let data_type = DataType::from_width(width, signed);
+                Indirect(data_type, MemorySpace(0), reg)
             },
 
-            Operand::IndirectDisplaced(reg, displace) => {
-                // Load the base register into a temporary.
-                let reg = self.encode_load_reg(reg);
+            Operand::IndirectDisplaced(width, reg, displace) => {
+                // Load the base address into a temporary.
+                let reg = self.encode_load_reg(reg, false);
 
-                // FIXME: Address does not have to be U64.
                 // Load the displacement constant into a temporary.
                 let constant = Temporary(U64, self.temps);
                 self.ops.push(MicroOperation::Const {
@@ -159,18 +260,27 @@ impl<'a> Encoder<'a> {
                 });
                 self.temps += 2;
 
-                Indirect(U64, MemorySpace(0), Temporary(U64, self.temps - 1)) // FIXME: U64
+                let data_type = DataType::from_width(width, signed);
+                Indirect(data_type, MemorySpace(0), Temporary(U64, self.temps - 1))
             },
 
-            Operand::Immediate(immediate) => Temp(self.encode_load_constant(immediate)),
-            Operand::Offset(offset) => Temp(self.encode_load_constant(offset as u64)),
+            Operand::Immediate(width, immediate) => {
+                // Load the immediate into a temporary.
+                let data_type = DataType::from_width(width, signed);
+                Temp(self.encode_load_constant(data_type, immediate))
+            },
+
+            Operand::Offset(offset) => {
+                let data_type = if signed { I64 } else { U64 };
+                Temp(self.encode_load_constant(data_type, offset as u64))
+            },
         }
     }
 
     /// Encode the micro operations to load a register from memory into a temporary.
     /// The resulting temporary will have the data type matching the registers width.
-    fn encode_load_reg(&mut self, reg: Register) -> Temporary {
-        let data_type = DataType::from_width(reg.width(), false);
+    fn encode_load_reg(&mut self, reg: Register, signed: bool) -> Temporary {
+        let data_type = DataType::from_width(reg.width(), signed);
         let temp = Temporary(data_type, self.temps);
 
         let src = Location::Direct(data_type, MemorySpace(1), reg_mem(reg));
@@ -181,12 +291,12 @@ impl<'a> Encoder<'a> {
     }
 
     /// Encode the micro operations to load a constant into a temporary.
-    fn encode_load_constant(&mut self, constant: u64) -> Temporary {
-        let temp = Temporary(DataType::U64, self.temps);
+    fn encode_load_constant(&mut self, data_type: DataType, constant: u64) -> Temporary {
+        let temp = Temporary(data_type, self.temps);
 
         self.ops.push(MicroOperation::Const {
             dest: Location::Temp(temp),
-            value: Immediate(DataType::U64, constant)
+            value: Immediate(data_type, constant)
         });
         self.temps += 1;
 
@@ -194,16 +304,23 @@ impl<'a> Encoder<'a> {
     }
 
     /// Encode a move operation with check for matching data types.
-    fn encode_move(&mut self, dest: Location, src: Location) {
+    fn encode_move(&mut self, dest: Location, src: Location) -> EncodeResult<()> {
         // Enforce that both operands have the exact same data type.
-        assert_eq!(src.data_type(), dest.data_type(), "incompatible data types for move");
-        self.ops.push(MicroOperation::Mov { dest, src });
+        if src.data_type() != dest.data_type() {
+            return Err(EncodeError::new(self.inst.clone(),
+                format!("incompatible data types for move: {} and {}",
+                    src.data_type(), dest.data_type())));
+        }
+        Ok(self.ops.push(MicroOperation::Mov { dest, src }))
     }
 }
 
 impl Display for Microcode {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        writeln!(f, "Microcode [")?;
+        write!(f, "Microcode [")?;
+        if !self.ops.is_empty() {
+            writeln!(f)?;
+        }
         for operation in &self.ops {
             writeln!(f, "    {}", operation)?;
         }
@@ -214,16 +331,6 @@ impl Display for Microcode {
 /// Describes one atomic operation.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum MicroOperation {
-    /// Store the sum of `a` and `b` in `sum`. Set flags if active.
-    Add { sum: Temporary, a: Temporary, b: Temporary, flags: bool },
-    /// Store the difference of `a` and `b` in `diff`. Set flags if active.
-    Sub { diff: Temporary, a: Temporary, b: Temporary, flags: bool },
-    /// Store the product of `a` and `b` in `prod`. Set flags if active.
-    Mul { prod: Temporary, a: Temporary, b: Temporary, flags: bool },
-    /// Store the bitwise AND of `a` and `b` in and. Set flags if active.
-    BitAnd { and: Temporary, a: Temporary, b: Temporary, flags: bool },
-    /// Store the bitwise OR of `a` and `b` in or. Set flags if active.
-    BitOr { or: Temporary, a: Temporary, b: Temporary, flags: bool },
     /// Store the value at location `src` in location `dest`.
     Mov { dest: Location, src: Location },
     /// Store a constant in location `dest`.
@@ -231,9 +338,27 @@ pub enum MicroOperation {
     /// Cast the temporary `target` to another type
     /// (possibly zero-extending, sign-extending or truncating).
     Cast { target: Temporary, new: DataType },
-    /// Jump to the address given in `target` if the value of the
-    /// condition temporary is not zero.
-    Jump { target: Temporary, condition: Temporary },
+
+    /// Store the sum of `a` and `b` in `sum`. Set flags if active.
+    Add { sum: Temporary, a: Temporary, b: Temporary, flags: bool },
+    /// Store the difference of `a` and `b` in `diff`. Set flags if active.
+    Sub { diff: Temporary, a: Temporary, b: Temporary, flags: bool },
+    /// Store the product of `a` and `b` in `prod`. Set flags if active.
+    Mul { prod: Temporary, a: Temporary, b: Temporary, flags: bool },
+
+    /// Store the bitwise AND of `a` and `b` in and. Set flags if active.
+    And { and: Temporary, a: Temporary, b: Temporary, flags: bool },
+    /// Store the bitwise OR of `a` and `b` in or. Set flags if active.
+    Or { or: Temporary, a: Temporary, b: Temporary, flags: bool },
+    /// Store the bitwise NOT of `a` in `not`.
+    Not { not: Temporary, a: Temporary },
+
+    /// Set the target temporary to one if the condition is true and to zero otherwise.
+    Set { target: Temporary, condition: Condition },
+    /// Jump to the current address plus the `offset` if `relative` is true,
+    /// otherwise directly to the target if the condition specified by `condition`
+    /// is fulfilled.
+    Jump { target: Temporary, condition: Condition, relative: bool },
     /// Perform a syscall.
     Syscall,
 }
@@ -243,16 +368,42 @@ impl Display for MicroOperation {
         use MicroOperation::*;
         fn flag(flags: bool) -> &'static str { if flags { " (flags)" } else { "" } }
         match *self {
-            Add { sum, a, b, flags } => write!(f, "add {} = {} + {}{}", sum, a, b, flag(flags)),
-            Sub { diff, a, b, flags } => write!(f, "sub {} = {} + {}{}", diff, a, b, flag(flags)),
-            Mul { prod, a, b, flags } => write!(f, "mul {} = {} + {}{}", prod, a, b, flag(flags)),
-            BitAnd { and, a, b, flags } => write!(f, "and {} = {} & {}{}", and, a, b, flag(flags)),
-            BitOr { or, a, b, flags } => write!(f, "or {} = {} | {}{}", or, a, b, flag(flags)),
             Mov { dest, src } => write!(f, "mov {} = {}", dest, src),
             Const { dest, value } => write!(f, "const {} = {}", dest, value),
             Cast { target, new } => write!(f, "cast {} to {}", target, new),
-            Jump { target, condition } => write!(f, "jump {} if {} != 0", target, condition),
+
+            Add { sum, a, b, flags } => write!(f, "add {} = {} + {}{}", sum, a, b, flag(flags)),
+            Sub { diff, a, b, flags } => write!(f, "sub {} = {} - {}{}", diff, a, b, flag(flags)),
+            Mul { prod, a, b, flags } => write!(f, "mul {} = {} * {}{}", prod, a, b, flag(flags)),
+
+            And { and, a, b, flags } => write!(f, "and {} = {} & {}{}", and, a, b, flag(flags)),
+            Or { or, a, b, flags } => write!(f, "or {} = {} | {}{}", or, a, b, flag(flags)),
+            Not { not, a } => write!(f, "not {} = !{}", not, a),
+
+            Set { target, condition } => write!(f, "set {} {}", target, condition),
+            Jump { target, condition, relative } => write!(f, "jump {} {} {}",
+                if relative { "by" } else { "to" }, target, condition),
             Syscall => write!(f, "syscall"),
+        }
+    }
+}
+
+/// Condition for jumps and sets.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum Condition {
+    Always,
+    Equal,
+    Less,
+    Greater,
+}
+
+impl Display for Condition {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Condition::Always => write!(f, "always"),
+            Condition::Equal => write!(f, "if equal"),
+            Condition::Less => write!(f, "if less"),
+            Condition::Greater => write!(f, "if greater"),
         }
     }
 }
@@ -261,12 +412,13 @@ impl Display for MicroOperation {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Location {
     Temp(Temporary),
-    Direct(DataType, MemorySpace, Address),
+    Direct(DataType, MemorySpace, u64),
     Indirect(DataType, MemorySpace, Temporary),
 }
 
 impl Location {
-    fn data_type(&self) -> DataType {
+    /// Underlying data type of values at the location.
+    pub fn data_type(&self) -> DataType {
         use Location::*;
         match *self {
             Temp(temp) => temp.0,
@@ -281,7 +433,7 @@ impl Display for Location {
         use Location::*;
         match self {
             Temp(temp) => write!(f, "{}", temp),
-            Direct(data, space, offset) => write!(f, "[{}][{}:{}]", space, offset, data),
+            Direct(data, space, offset) => write!(f, "[{}][{:#x}:{}]", space, offset, data),
             Indirect(data, space, temp) => write!(f, "[{}][({}):{}]", space, temp, data),
         }
     }
@@ -291,9 +443,8 @@ impl Display for Location {
 ///
 /// Typically,
 /// - memory space `0` is used for the flat primary memory space
-/// - memory space `1` is used for registers (their addresses can be
-///   retrieve through the [`reg_mem`] function).
-/// - memory space `2` is used for flags.
+/// - memory space `1` is used for registers (see [`reg_mem`]).
+/// - memory space `2` is used for flags (see [`flag_mem`]).
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct MemorySpace(pub usize);
 
@@ -319,17 +470,16 @@ pub struct Immediate(pub DataType, pub u64);
 
 impl Display for Immediate {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "0x{:x}:{}", self.1, self.0)
-    }
-}
-
-/// Memory address.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct Address(pub u64);
-
-impl Display for Address {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "0x{:x}", self.0)
+        use DataType::*;
+        match self.0 {
+            I8 | I16 | I32 | I64 => if (self.1 as i64) >= 0 {
+                write!(f, "{:#x}", self.1)
+            } else {
+                write!(f, "-{:#x}", -(self.1 as i64))
+            }
+            U8 | U16 | U32 | U64 => write!(f, "{:#x}", self.1),
+        }?;
+        write!(f, ":{}", self.0)
     }
 }
 
@@ -341,13 +491,24 @@ pub enum DataType {
 
 impl DataType {
     /// The data type for the specified bit width. (signed or unsigned).
-    fn from_width(width: DataWidth, signed: bool) -> DataType {
+    pub fn from_width(width: DataWidth, signed: bool) -> DataType {
         use DataType::*;
         match width {
             DataWidth::Bits8  => [U8, I8][signed as usize],
             DataWidth::Bits16 => [U16, I16][signed as usize],
             DataWidth::Bits32 => [U32, I32][signed as usize],
             DataWidth::Bits64 => [U64, I64][signed as usize],
+        }
+    }
+
+    /// The width of the data type.
+    pub fn width(&self) -> DataWidth {
+        use DataType::*;
+        match self {
+            U8 | I8 => DataWidth::Bits8 ,
+            U16 | I16 => DataWidth::Bits16,
+            U32 | I32 => DataWidth::Bits32,
+            U64 | I64 => DataWidth::Bits64,
         }
     }
 }
@@ -358,10 +519,10 @@ impl Display for DataType {
     }
 }
 
-/// Returns the address of a register in the register memory space.
-pub fn reg_mem(reg: Register) -> Address {
+/// Address of a register in the register memory space.
+pub fn reg_mem(reg: Register) -> u64 {
     use Register::*;
-    Address(match reg {
+    match reg {
         AL | AX | EAX | RAX => 0x00,
         CL | CX | ECX | RCX => 0x08,
         DL | DX | EDX | RDX => 0x10,
@@ -378,9 +539,52 @@ pub fn reg_mem(reg: Register) -> Address {
         R13 => 0x68,
         R14 => 0x70,
         R15 => 0x78,
-    })
+        IP | EIP | RIP => 0x80,
+    }
 }
 
+/// Address of a flag register in the register memory space.
+pub fn flag_mem(flag: Flag) -> u64 {
+    use Flag::*;
+    match flag {
+        Carry => 0x100,
+        Parity => 0x101,
+        Adjust => 0x102,
+        Zero => 0x103,
+        Sign => 0x104,
+        Overflow => 0x105,
+    }
+}
+
+/// Error type for microcode encoding.
+#[derive(Eq, PartialEq)]
+pub struct EncodeError {
+    pub instruction: Instruction,
+    pub message: String,
+}
+
+impl EncodeError {
+    /// Create a new encoding error with a mesage.
+    fn new<S: Into<String>>(instruction: Instruction, message: S) -> EncodeError {
+        EncodeError { instruction, message: message.into() }
+    }
+}
+
+/// Result type for instruction decoding.
+pub(in super) type EncodeResult<T> = Result<T, EncodeError>;
+impl std::error::Error for EncodeError {}
+
+impl Display for EncodeError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "Failed to encode instruction {}: {}.", self.instruction, self.message)
+    }
+}
+
+impl Debug for EncodeError {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        Display::fmt(self, f)
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -389,8 +593,10 @@ mod test {
 
     fn test(bytes: &[u8], display: &str) {
         let instruction = Instruction::decode(bytes).unwrap();
-        let code = Microcode::from_instruction(&instruction);
+        let code = Microcode::from_instruction(&instruction).unwrap();
         let display = codify(display);
+        println!("==================================");
+        println!("bytes: {:#02x?}", bytes);
         println!("encoded: {}", code);
         println!("display: {}", display);
         println!();
@@ -411,8 +617,8 @@ mod test {
     }
 
     #[test]
-    fn microcode() {
-        // Instruction: add r8, [rdi+0xa]
+    fn binops() {
+        // Instruction: add r8, qword ptr [rdi+0xa]
         // The microcode works as follows:
         // - Move r8 into t0
         // - Move rdi into t1, move 0xa into t2, sum them up into t3
@@ -420,28 +626,64 @@ mod test {
         // - Compute the sum of t0 and t4 and store it in t5
         // - Move t5 into r8
         test(&[0x4c, 0x03, 0x47, 0x0a], "
-            mov T0:u64 = [mem1][0x40:u64]
+            mov T0:i64 = [mem1][0x40:i64]
             mov T1:u64 = [mem1][0x38:u64]
             const T2:u64 = 0xa:u64
             add T3:u64 = T1:u64 + T2:u64
-            mov T4:u64 = [mem0][(T3:u64):u64]
-            add T5:u64 = T0:u64 + T4:u64 (flags)
-            mov [mem1][0x40:u64] = T5:u64
+            mov T4:i64 = [mem0][(T3:u64):i64]
+            add T5:i64 = T0:i64 + T4:i64 (flags)
+            mov [mem1][0x40:i64] = T5:i64
         ");
 
-        // Instruction: mov esi, edx
-        test(&[0x89, 0xd6], "mov [mem1][0x30:u32] = [mem1][0x10:u32]");
+        // Instruction: sub rsp, 0x10
+        test(&[0x48, 0x83, 0xec, 0x10], "
+            mov T0:i64 = [mem1][0x20:i64]
+            const T1:i8 = 0x10:i8
+            cast T1:i8 to i64
+            sub T2:i64 = T0:i64 - T1:i64 (flags)
+            mov [mem1][0x20:i64] = T2:i64
+        ");
 
-        // Instruction: mov [rbp-0x8], 0xa
+        // Instruction: sub eax, 0x20
+        test(&[0x83, 0xe8, 0x20], "
+            mov T0:i32 = [mem1][0x0:i32]
+            const T1:i8 = 0x20:i8
+            cast T1:i8 to i32
+            sub T2:i32 = T0:i32 - T1:i32 (flags)
+            mov [mem1][0x0:i32] = T2:i32
+        ");
+    }
+
+    #[test]
+    fn moves() {
+        // Instruction: mov esi, edx
+        test(&[0x89, 0xd6], "mov [mem1][0x30:i32] = [mem1][0x10:i32]");
+
+        // Instruction: mov rax, 0x3c
+        test(&[0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00], "
+            const T0:i32 = 0x3c:i32
+            cast T0:i32 to i64
+            mov [mem1][0x0:i64] = T0:i64
+        ");
+
+        // Instruction: mov dword ptr [rbp-0x4], edi
+        test(&[0x89, 0x7d, 0xfc], "
+            mov T0:u64 = [mem1][0x28:u64]
+            const T1:u64 = 0xfffffffffffffffc:u64
+            add T2:u64 = T0:u64 + T1:u64
+            mov [mem0][(T2:u64):i32] = [mem1][0x38:i32]
+        ");
+
+        // Instruction: mov dword ptr [rbp-0x8], 0xa
         test(&[0xc7, 0x45, 0xf8, 0x0a, 0x00, 0x00, 0x00], "
             mov T0:u64 = [mem1][0x28:u64]
             const T1:u64 = 0xfffffffffffffff8:u64
             add T2:u64 = T0:u64 + T1:u64
-            const T3:u64 = 0xa:u64
-            mov [mem0][(T2:u64):u64] = T3:u64
+            const T3:i32 = 0xa:i32
+            mov [mem0][(T2:u64):i32] = T3:i32
         ");
 
-        // Instruction: lea rax, [rbp-0xc]
+        // Instruction: lea rax, qword ptr [rbp-0xc]
         test(&[0x48, 0x8d, 0x45, 0xf4], "
             mov T0:u64 = [mem1][0x28:u64]
             const T1:u64 = 0xfffffffffffffff4:u64
@@ -454,6 +696,102 @@ mod test {
             mov T0:u8 = [mem1][0x0:u8]
             cast T0:u8 to u32
             mov [mem1][0x0:u32] = T0:u32
+        ");
+
+        // Instruction: push rbp
+        test(&[0x55], "
+            mov T0:u64 = [mem1][0x20:u64]
+            const T1:u64 = 0x8:u64
+            sub T0:u64 = T0:u64 - T1:u64
+            mov [mem0][(T0:u64):i64] = [mem1][0x28:i64]
+            mov [mem1][0x20:u64] = T0:u64
+        ");
+
+        // Instruction: pop rbp
+        test(&[0x5d], "
+            mov T0:u64 = [mem1][0x20:u64]
+            mov [mem1][0x28:i64] = [mem0][(T0:u64):i64]
+            const T1:u64 = 0x8:u64
+            add T0:u64 = T0:u64 + T1:u64
+            mov [mem1][0x20:u64] = T0:u64
+        ");
+    }
+
+    #[test]
+    fn compares() {
+        // Instruction: cmp eax, dword ptr [rbp-0x8]
+        test(&[0x3b, 0x45, 0xf8], "
+            mov T0:i32 = [mem1][0x0:i32]
+            mov T1:u64 = [mem1][0x28:u64]
+            const T2:u64 = 0xfffffffffffffff8:u64
+            add T3:u64 = T1:u64 + T2:u64
+            mov T4:i32 = [mem0][(T3:u64):i32]
+            sub T5:i32 = T0:i32 - T4:i32 (flags)
+        ");
+
+        // Instruction: test eax, eax
+        test(&[0x85, 0xc0], "
+            mov T0:i32 = [mem1][0x0:i32]
+            mov T1:i32 = [mem1][0x0:i32]
+            and T2:i32 = T0:i32 & T1:i32 (flags)
+        ");
+
+        // Instruction: setl al
+        test(&[0x0f, 0x9c, 0xc0], "
+            set T0:u8 if less
+            mov [mem1][0x0:u8] = T0:u8
+        ");
+    }
+
+    #[test]
+    fn jumps() {
+        // Instruction: jmp +0x9
+        test(&[0xeb, 0x07], "
+            const T0:i64 = 0x9:i64
+            jump by T0:i64 always
+        ");
+
+        // Instruction: jg +0xb
+        test(&[0x7f, 0x09], "
+            const T0:i64 = 0xb:i64
+            jump by T0:i64 if greater
+        ");
+
+        // Instruction: je +0x10
+        test(&[0x74, 0x0e], "
+            const T0:i64 = 0x10:i64
+            jump by T0:i64 if equal
+        ");
+
+        // Instruction: call -0x71
+        test(&[0xe8, 0x8a, 0xff, 0xff, 0xff], "
+            mov T0:u64 = [mem1][0x20:u64]
+            const T1:u64 = 0x8:u64
+            sub T0:u64 = T0:u64 - T1:u64
+            mov [mem0][(T0:u64):u64] = [mem1][0x80:u64]
+            mov [mem1][0x20:u64] = T0:u64
+            const T2:i64 = -0x71:i64
+            jump by T2:i64 always
+        ");
+
+        // Instruction: leave
+        test(&[0xc9], "
+            mov [mem1][0x20:u64] = [mem1][0x28:u64]
+            mov T0:u64 = [mem1][0x20:u64]
+            mov [mem1][0x28:u64] = [mem0][(T0:u64):u64]
+            const T1:u64 = 0x8:u64
+            add T0:u64 = T0:u64 + T1:u64
+            mov [mem1][0x20:u64] = T0:u64
+        ");
+
+        // Instruction: ret
+        test(&[0xc3], "
+            mov T1:u64 = [mem1][0x20:u64]
+            mov T0:u64 = [mem0][(T1:u64):u64]
+            const T2:u64 = 0x8:u64
+            add T1:u64 = T1:u64 + T2:u64
+            mov [mem1][0x20:u64] = T1:u64
+            jump to T0:u64 always
         ");
     }
 }
