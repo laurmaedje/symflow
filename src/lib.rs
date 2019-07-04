@@ -2,13 +2,16 @@
 
 #![allow(unused)]
 
+use std::collections::HashMap;
 use std::fmt::{self, Display, Debug, Formatter};
 use crate::amd64::{Instruction, Mnemoic, DecodeError, DecodeResult};
 use crate::ir::{Microcode, EncodeError};
 
-pub mod elf;
 pub mod amd64;
+pub mod elf;
 pub mod ir;
+pub mod num;
+pub mod sim;
 
 
 /// View into a slice of machine code.
@@ -24,42 +27,20 @@ impl<'a> Code<'a> {
         Code { base, code }
     }
 
-    /// Disassemble the whole code.
-    pub fn disassemble_all(&self) -> DisassembleResult<Block> {
-        let mut instructions = Vec::new();
+    /// Disassemble the whole code into a microcode program.
+    pub fn disassemble_program(&self) -> DisassembleResult<Program> {
+        let mut mapping = HashMap::new();
 
         let mut addr = self.base;
         while addr - self.base < self.code.len() as u64 {
             let inst = self.disassemble_instruction(addr)?;
             let len = inst.bytes.len() as u64;
             let microcode = Microcode::from_instruction(&inst)?;
-            instructions.push((addr, inst, microcode));
+            mapping.insert(addr, (len, inst, microcode));
             addr += len;
         }
 
-        Ok(Block { instructions })
-    }
-
-    /// Disassemble a basic block at an address.
-    pub fn disassemble_block(&self, mut addr: u64) -> DisassembleResult<Block> {
-        let mut instructions = Vec::new();
-
-        let mut finished = false;
-        while !finished && addr - self.base < self.code.len() as u64 {
-            let inst = self.disassemble_instruction(addr)?;
-
-            // If this is a `ret` instruction, the block is ended.
-            if inst.mnemoic == Mnemoic::Ret {
-                finished = true;
-            }
-
-            let len = inst.bytes.len() as u64;
-            let microcode = Microcode::from_instruction(&inst)?;
-            instructions.push((addr, inst, microcode));
-            addr += len;
-        }
-
-        Ok(Block { instructions })
+        Ok(Program { mapping })
     }
 
     /// Tries to decode a single instruction at an address.
@@ -70,20 +51,29 @@ impl<'a> Code<'a> {
     }
 }
 
-/// Block of machine code instructions.
+/// A microcode program composed of microcode at addresses.
 #[derive(Debug, Clone)]
-pub struct Block {
-    pub instructions: Vec<(u64, Instruction, Microcode)>,
+pub struct Program {
+    pub mapping: HashMap<u64, (u64, Instruction , Microcode)>,
 }
 
-impl Display for Block {
+impl Program {
+    /// Create an empty program.
+    pub fn empty() -> Program {
+        Program { mapping: HashMap::new() }
+    }
+}
+
+impl Display for Program {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Block [")?;
-        if !self.instructions.is_empty() {
+        let mut values: Vec<_> = self.mapping.iter().map(|(a, (_, i, m))| (a, i, m)).collect();
+        values.sort_by_key(|triple| triple.0);
+        write!(f, "Program [")?;
+        if !values.is_empty() {
             writeln!(f)?;
         }
         let mut start = true;
-        for (addr, instruction, microcode) in &self.instructions {
+        for (addr, instruction, microcode) in values {
             if !start {
                 writeln!(f)?;
             }
@@ -135,25 +125,5 @@ impl From<DecodeError> for DisassembleError {
 impl From<EncodeError> for DisassembleError {
     fn from(err: EncodeError) -> DisassembleError {
         DisassembleError::Encode(err)
-    }
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::elf::*;
-    use super::*;
-
-    #[test]
-    fn disassemble() {
-        // Read the text section from the binary file.
-        let bin = std::fs::read("test/block").unwrap();
-        let mut file = ElfFile::from_slice(&bin).unwrap();
-        let text = file.get_section(".text").unwrap();
-
-        // Disassemble the whole code and print it.
-        let code = Code::new(text.header.addr, &text.data);
-        let all = code.disassemble_all().unwrap();
-        println!("{}", all);
     }
 }

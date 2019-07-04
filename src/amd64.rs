@@ -2,6 +2,7 @@
 
 use std::fmt::{self, Debug, Display, Formatter};
 use byteorder::{ByteOrder, LittleEndian};
+use crate::num::{DataWidth, Integer};
 
 
 /// Decoded machine code instruction.
@@ -98,8 +99,6 @@ impl<'a> Decoder<'a> {
         } else if let Rel(width) = op {
             // Parse the relative offset and adjust it by the length of this instruction.
             let mut offset = self.decode_offset(width);
-            offset += self.bytes.len() as i64;
-
             operands.push(Operand::Offset(offset));
         }
 
@@ -331,11 +330,11 @@ impl Display for Operand {
         use Operand::*;
         match self {
             Direct(reg) => write!(f, "{}", reg),
-            Indirect(width, reg) => write!(f, "{} [{}]", width_name(*width), reg),
+            Indirect(width, reg) => write!(f, "{} ptr [{}]", width, reg),
             IndirectDisplaced(width, reg, offset) => if *offset >= 0 {
-                write!(f, "{} [{}+{:#x}]", width_name(*width), reg, offset)
+                write!(f, "{} ptr [{}+{:#x}]", width, reg, offset)
             } else {
-                write!(f, "{} [{}-{:#x}]", width_name(*width), reg, -offset)
+                write!(f, "{} ptr [{}-{:#x}]", width, reg, -offset)
             },
             Immediate(_, value) => write!(f, "{:#x}", value),
             Offset(offset) => if *offset >= 0 {
@@ -344,16 +343,6 @@ impl Display for Operand {
                 write!(f, "-{:#x}", -offset)
             }
         }
-    }
-}
-
-/// The name for a byte width of an indirect operand.
-fn width_name(width: DataWidth) -> &'static str {
-    match width {
-        DataWidth::Bits8 => "byte ptr",
-        DataWidth::Bits16 => "word ptr",
-        DataWidth::Bits32 => "dword ptr",
-        DataWidth::Bits64 => "qword ptr",
     }
 }
 
@@ -423,27 +412,6 @@ pub enum Flag {
     Overflow,
 }
 
-/// Width of data in bits.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum DataWidth {
-    Bits8 = 0,
-    Bits16 = 1,
-    Bits32 = 2,
-    Bits64 = 3,
-}
-
-impl DataWidth {
-    /// The number of bytes this width equals.
-    pub fn bytes(&self) -> usize {
-        match self {
-            DataWidth::Bits8 => 1,
-            DataWidth::Bits16 => 2,
-            DataWidth::Bits32 => 4,
-            DataWidth::Bits64 => 8,
-        }
-    }
-}
-
 /// Error type for instruction decoding.
 #[derive(Eq, PartialEq)]
 pub struct DecodeError {
@@ -507,26 +475,26 @@ mod tests {
         test(&[0x48, 0x83, 0xec, 0x10], "sub rsp, 0x10");
         test(&[0xc7, 0x45, 0xf8, 0x0a, 0x00, 0x00, 0x00], "mov dword ptr [rbp-0x8], 0xa");
         test(&[0x83, 0x7d, 0xf8, 0x04], "cmp dword ptr [rbp-0x8], 0x4");
-        test(&[0x7f, 0x09], "jg +0xb");
+        test(&[0x7f, 0x09], "jg +0x9");
         test(&[0xc7, 0x45, 0xfc, 0x0f, 0x00, 0x00, 0x00], "mov dword ptr [rbp-0x4], 0xf");
-        test(&[0xeb, 0x07], "jmp +0x9");
+        test(&[0xeb, 0x07], "jmp +0x7");
         test(&[0xc7, 0x45, 0xfc, 0x05, 0x00, 0x00, 0x00], "mov dword ptr [rbp-0x4], 0x5");
         test(&[0x8b, 0x55, 0xfc], "mov edx, dword ptr [rbp-0x4]");
         test(&[0x89, 0xd6], "mov esi, edx");
         test(&[0x89, 0xc7], "mov edi, eax");
-        test(&[0xe8, 0x8a, 0xff, 0xff, 0xff], "call -0x71");
+        test(&[0xe8, 0x8a, 0xff, 0xff, 0xff], "call -0x76");
         test(&[0x85, 0xc0], "test eax, eax");
-        test(&[0x74, 0x0e], "je +0x10");
+        test(&[0x74, 0x0e], "je +0xe");
         test(&[0x48, 0x8d, 0x45, 0xf4], "lea rax, qword ptr [rbp-0xc]");
         test(&[0x48, 0x89, 0xc7], "mov rdi, rax");
 
-        test(&[0xe8, 0x92, 0xff, 0xff, 0xff], "call -0x69");
-        test(&[0xeb, 0x0c], "jmp +0xe");
-        test(&[0xe8, 0x99, 0xff, 0xff, 0xff], "call -0x62");
+        test(&[0xe8, 0x92, 0xff, 0xff, 0xff], "call -0x6e");
+        test(&[0xeb, 0x0c], "jmp +0xc");
+        test(&[0xe8, 0x99, 0xff, 0xff, 0xff], "call -0x67");
         test(&[0xc9], "leave");
 
         test(&[0xb8, 0x00, 0x00, 0x00, 0x00], "mov eax, 0x0");
-        test(&[0xe8, 0x9d, 0xff, 0xff, 0xff], "call -0x5e");
+        test(&[0xe8, 0x9d, 0xff, 0xff, 0xff], "call -0x63");
         test(&[0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00], "mov rax, 0x3c");
         test(&[0x48, 0xc7, 0xc7, 0x00, 0x00, 0x00, 0x00], "mov rdi, 0x0");
         test(&[0x0f, 0x05], "syscall");

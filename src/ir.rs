@@ -1,7 +1,8 @@
 //! Microcode representation of instructions.
 
 use std::fmt::{self, Debug, Display, Formatter};
-use crate::amd64::{Instruction, Mnemoic, Operand, Register, Flag, DataWidth};
+use crate::amd64::{Instruction, Mnemoic, Operand, Register, Flag};
+use crate::num::{DataType, DataWidth, Integer};
 
 
 /// Microcode composed of any number of micro operations.
@@ -121,7 +122,7 @@ impl<'a> Encoder<'a> {
     }
 
     /// Encode a binary operation like add or subtract.
-    fn encode_binop<F>(&mut self, bin_op: F, store: bool)
+    fn encode_binop<F>(&mut self, binop: F, store: bool)
     where F: FnOnce(Temporary, Temporary, Temporary) -> MicroOperation {
         // Encode the loading of both operands into a temporary.
         let (dest, left) = self.encode_load_operand(self.inst.operands[0], true);
@@ -137,7 +138,7 @@ impl<'a> Encoder<'a> {
         // into the destination.
         let target = Temporary(left.0, self.temps);
         self.temps += 1;
-        self.ops.push(bin_op(target, left, right));
+        self.ops.push(binop(target, left, right));
         if store {
             self.ops.push(MicroOperation::Mov { dest, src: Location::Temp(target) });
         }
@@ -147,8 +148,8 @@ impl<'a> Encoder<'a> {
     fn encode_jump(&mut self, condition: Condition) {
         if let Operand::Offset(offset) = self.inst.operands[0] {
             let target = Temporary(DataType::I64, self.temps);
-            let value = Immediate(DataType::I64, offset as u64);
-            self.ops.push(MicroOperation::Const { dest: Location::Temp(target), value });
+            let constant = Integer(DataType::I64, offset as u64);
+            self.ops.push(MicroOperation::Const { dest: Location::Temp(target), constant });
             self.ops.push(MicroOperation::Jump { target, condition, relative: true });
             self.temps += 1;
         } else {
@@ -168,32 +169,42 @@ impl<'a> Encoder<'a> {
     /// Load the stack pointer, decrement it by the operand size, store the
     /// operand on the stack and store the new stack pointer in the register.
     fn encode_push(&mut self, src: Location) {
+        // Load the stack pointer.
         let (sp, stack) = self.encode_load_operand(Operand::Direct(Register::RSP), false);
         let data_type = src.data_type();
 
+        // Load the width of the moved thing as a constant and subtract it from the
+        // stack pointer.
         let offset = Temporary(DataType::U64, self.temps);
-        let value = Immediate(DataType::U64, data_type.width().bytes() as u64);
-        self.ops.push(MicroOperation::Const { dest: Location::Temp(offset), value });
+        let constant = Integer(DataType::U64, data_type.width().bytes());
+        self.ops.push(MicroOperation::Const { dest: Location::Temp(offset), constant });
         self.ops.push(MicroOperation::Sub { diff: stack, a: stack, b: offset, flags: false });
         self.temps += 1;
 
-        let stack_space = Location::Indirect(data_type, MemorySpace(0), stack);
+        // Move the value from the source onto the stack.
+        let stack_space = Location::Indirect(data_type, 0, stack);
         self.encode_move(stack_space, src).unwrap();
+
+        // Copy back the stack pointer.
         self.encode_move(sp, Location::Temp(stack)).unwrap();
     }
 
     /// Load the operand from the stack, load the stack pointer, increment it
     /// by the operand size and store the new stack pointer in the register.
     fn encode_pop(&mut self, dest: Location) {
+        // Load the stack pointer.
         let (sp, stack) = self.encode_load_operand(Operand::Direct(Register::RSP), false);
         let data_type = dest.data_type();
 
-        let stack_space = Location::Indirect(data_type, MemorySpace(0), stack);
+        // Move the value from the stack into the destination.
+        let stack_space = Location::Indirect(data_type, 0, stack);
         self.encode_move(dest, stack_space).unwrap();
 
+        // Load the width of the moved thing as a constant and add it to the
+        // stack pointer. Then copy the stack pointer back into it's register.
         let offset = Temporary(DataType::U64, self.temps);
-        let value = Immediate(DataType::U64, data_type.width().bytes() as u64);
-        self.ops.push(MicroOperation::Const { dest: Location::Temp(offset), value });
+        let constant = Integer(DataType::U64, data_type.width().bytes());
+        self.ops.push(MicroOperation::Const { dest: Location::Temp(offset), constant });
         self.ops.push(MicroOperation::Add { sum: stack, a: stack, b: offset, flags: false });
         self.temps += 1;
         self.encode_move(sp, Location::Temp(stack)).unwrap();
@@ -232,14 +243,14 @@ impl<'a> Encoder<'a> {
             Operand::Direct(reg) => {
                 // Locate the registers in memory.
                 let data_type = DataType::from_width(reg.width(), signed);
-                Direct(data_type, MemorySpace(1), reg_mem(reg))
+                Direct(data_type, 1, reg.address())
             },
 
             Operand::Indirect(width, reg) => {
                 // Load the address into a temporary.
                 let reg = self.encode_load_reg(reg, false);
                 let data_type = DataType::from_width(width, signed);
-                Indirect(data_type, MemorySpace(0), reg)
+                Indirect(data_type, 0, reg)
             },
 
             Operand::IndirectDisplaced(width, reg, displace) => {
@@ -250,7 +261,7 @@ impl<'a> Encoder<'a> {
                 let constant = Temporary(U64, self.temps);
                 self.ops.push(MicroOperation::Const {
                     dest: Location::Temp(constant),
-                    value: Immediate(U64, displace as u64)
+                    constant: Integer(U64, displace as u64)
                 });
 
                 // Compute the final address.
@@ -261,7 +272,7 @@ impl<'a> Encoder<'a> {
                 self.temps += 2;
 
                 let data_type = DataType::from_width(width, signed);
-                Indirect(data_type, MemorySpace(0), Temporary(U64, self.temps - 1))
+                Indirect(data_type, 0, Temporary(U64, self.temps - 1))
             },
 
             Operand::Immediate(width, immediate) => {
@@ -283,7 +294,7 @@ impl<'a> Encoder<'a> {
         let data_type = DataType::from_width(reg.width(), signed);
         let temp = Temporary(data_type, self.temps);
 
-        let src = Location::Direct(data_type, MemorySpace(1), reg_mem(reg));
+        let src = Location::Direct(data_type, 1, reg.address());
         self.ops.push(MicroOperation::Mov { dest: Location::Temp(temp), src });
         self.temps += 1;
 
@@ -296,7 +307,7 @@ impl<'a> Encoder<'a> {
 
         self.ops.push(MicroOperation::Const {
             dest: Location::Temp(temp),
-            value: Immediate(data_type, constant)
+            constant: Integer(data_type, constant)
         });
         self.temps += 1;
 
@@ -334,7 +345,7 @@ pub enum MicroOperation {
     /// Store the value at location `src` in location `dest`.
     Mov { dest: Location, src: Location },
     /// Store a constant in location `dest`.
-    Const { dest: Location, value: Immediate },
+    Const { dest: Location, constant: Integer },
     /// Cast the temporary `target` to another type
     /// (possibly zero-extending, sign-extending or truncating).
     Cast { target: Temporary, new: DataType },
@@ -359,6 +370,7 @@ pub enum MicroOperation {
     /// otherwise directly to the target if the condition specified by `condition`
     /// is fulfilled.
     Jump { target: Temporary, condition: Condition, relative: bool },
+
     /// Perform a syscall.
     Syscall,
 }
@@ -369,7 +381,7 @@ impl Display for MicroOperation {
         fn flag(flags: bool) -> &'static str { if flags { " (flags)" } else { "" } }
         match *self {
             Mov { dest, src } => write!(f, "mov {} = {}", dest, src),
-            Const { dest, value } => write!(f, "const {} = {}", dest, value),
+            Const { dest, constant } => write!(f, "const {} = {}", dest, constant),
             Cast { target, new } => write!(f, "cast {} to {}", target, new),
 
             Add { sum, a, b, flags } => write!(f, "add {} = {} + {}{}", sum, a, b, flag(flags)),
@@ -383,6 +395,7 @@ impl Display for MicroOperation {
             Set { target, condition } => write!(f, "set {} {}", target, condition),
             Jump { target, condition, relative } => write!(f, "jump {} {} {}",
                 if relative { "by" } else { "to" }, target, condition),
+
             Syscall => write!(f, "syscall"),
         }
     }
@@ -412,8 +425,8 @@ impl Display for Condition {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Location {
     Temp(Temporary),
-    Direct(DataType, MemorySpace, u64),
-    Indirect(DataType, MemorySpace, Temporary),
+    Direct(DataType, usize, u64),
+    Indirect(DataType, usize, Temporary),
 }
 
 impl Location {
@@ -433,24 +446,9 @@ impl Display for Location {
         use Location::*;
         match self {
             Temp(temp) => write!(f, "{}", temp),
-            Direct(data, space, offset) => write!(f, "[{}][{:#x}:{}]", space, offset, data),
-            Indirect(data, space, temp) => write!(f, "[{}][({}):{}]", space, temp, data),
+            Direct(data, space, offset) => write!(f, "[mem{}][{:#x}:{}]", space, offset, data),
+            Indirect(data, space, temp) => write!(f, "[mem{}][({}):{}]", space, temp, data),
         }
-    }
-}
-
-/// Memory space identified by an index.
-///
-/// Typically,
-/// - memory space `0` is used for the flat primary memory space
-/// - memory space `1` is used for registers (see [`reg_mem`]).
-/// - memory space `2` is used for flags (see [`flag_mem`]).
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct MemorySpace(pub usize);
-
-impl Display for MemorySpace {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "mem{}", self.0)
     }
 }
 
@@ -464,95 +462,50 @@ impl Display for Temporary {
     }
 }
 
-/// Strongly typed immediate value.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct Immediate(pub DataType, pub u64);
-
-impl Display for Immediate {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        use DataType::*;
-        match self.0 {
-            I8 | I16 | I32 | I64 => if (self.1 as i64) >= 0 {
-                write!(f, "{:#x}", self.1)
-            } else {
-                write!(f, "-{:#x}", -(self.1 as i64))
-            }
-            U8 | U16 | U32 | U64 => write!(f, "{:#x}", self.1),
-        }?;
-        write!(f, ":{}", self.0)
-    }
+/// Addresses of things stored in memory (registers & flags).
+pub trait MemoryMapped {
+    /// Address of the memory mapped thing.
+    fn address(&self) -> u64;
 }
 
-/// Basic numeric types.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum DataType {
-    I8, U8, I16, U16, I32, U32, I64, U64,
-}
-
-impl DataType {
-    /// The data type for the specified bit width. (signed or unsigned).
-    pub fn from_width(width: DataWidth, signed: bool) -> DataType {
-        use DataType::*;
-        match width {
-            DataWidth::Bits8  => [U8, I8][signed as usize],
-            DataWidth::Bits16 => [U16, I16][signed as usize],
-            DataWidth::Bits32 => [U32, I32][signed as usize],
-            DataWidth::Bits64 => [U64, I64][signed as usize],
-        }
-    }
-
-    /// The width of the data type.
-    pub fn width(&self) -> DataWidth {
-        use DataType::*;
+impl MemoryMapped for Register {
+    /// Address of a register in the register memory space.
+    fn address(&self) -> u64 {
+        use Register::*;
         match self {
-            U8 | I8 => DataWidth::Bits8 ,
-            U16 | I16 => DataWidth::Bits16,
-            U32 | I32 => DataWidth::Bits32,
-            U64 | I64 => DataWidth::Bits64,
+            AL | AX | EAX | RAX => 0x00,
+            CL | CX | ECX | RCX => 0x08,
+            DL | DX | EDX | RDX => 0x10,
+            BL | BX | EBX | RBX => 0x18,
+            AH | SP | ESP | RSP => 0x20,
+            CH | BP | EBP | RBP => 0x28,
+            DH | SI | ESI | RSI => 0x30,
+            BH | DI | EDI | RDI => 0x38,
+            R8  => 0x40,
+            R9  => 0x48,
+            R10 => 0x50,
+            R11 => 0x58,
+            R12 => 0x60,
+            R13 => 0x68,
+            R14 => 0x70,
+            R15 => 0x78,
+            IP | EIP | RIP => 0x80,
         }
     }
 }
 
-impl Display for DataType {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}", format!("{:?}", self).to_lowercase())
-    }
-}
-
-/// Address of a register in the register memory space.
-pub fn reg_mem(reg: Register) -> u64 {
-    use Register::*;
-    match reg {
-        AL | AX | EAX | RAX => 0x00,
-        CL | CX | ECX | RCX => 0x08,
-        DL | DX | EDX | RDX => 0x10,
-        BL | BX | EBX | RBX => 0x18,
-        AH | SP | ESP | RSP => 0x20,
-        CH | BP | EBP | RBP => 0x28,
-        DH | SI | ESI | RSI => 0x30,
-        BH | DI | EDI | RDI => 0x38,
-        R8  => 0x40,
-        R9  => 0x48,
-        R10 => 0x50,
-        R11 => 0x58,
-        R12 => 0x60,
-        R13 => 0x68,
-        R14 => 0x70,
-        R15 => 0x78,
-        IP | EIP | RIP => 0x80,
-    }
-}
-
-/// Address of a flag register in the register memory space.
-pub fn flag_mem(flag: Flag) -> u64 {
-    use Flag::*;
-    match flag {
-        Carry => 0x100,
-        Parity => 0x101,
-        Adjust => 0x102,
-        Zero => 0x103,
-        Sign => 0x104,
-        Overflow => 0x105,
+impl MemoryMapped for Flag {
+    /// Address of a flag register in the register memory space.
+    fn address(&self) -> u64 {
+        use Flag::*;
+        match self {
+            Carry => 0x100,
+            Parity => 0x101,
+            Adjust => 0x102,
+            Zero => 0x103,
+            Sign => 0x104,
+            Overflow => 0x105,
+        }
     }
 }
 
@@ -745,32 +698,32 @@ mod test {
 
     #[test]
     fn jumps() {
-        // Instruction: jmp +0x9
+        // Instruction: jmp +0x7
         test(&[0xeb, 0x07], "
-            const T0:i64 = 0x9:i64
+            const T0:i64 = 0x7:i64
             jump by T0:i64 always
         ");
 
-        // Instruction: jg +0xb
+        // Instruction: jg +0x9
         test(&[0x7f, 0x09], "
-            const T0:i64 = 0xb:i64
+            const T0:i64 = 0x9:i64
             jump by T0:i64 if greater
         ");
 
-        // Instruction: je +0x10
+        // Instruction: je +0xe
         test(&[0x74, 0x0e], "
-            const T0:i64 = 0x10:i64
+            const T0:i64 = 0xe:i64
             jump by T0:i64 if equal
         ");
 
-        // Instruction: call -0x71
+        // Instruction: call -0x76
         test(&[0xe8, 0x8a, 0xff, 0xff, 0xff], "
             mov T0:u64 = [mem1][0x20:u64]
             const T1:u64 = 0x8:u64
             sub T0:u64 = T0:u64 - T1:u64
             mov [mem0][(T0:u64):u64] = [mem1][0x80:u64]
             mov [mem1][0x20:u64] = T0:u64
-            const T2:i64 = -0x71:i64
+            const T2:i64 = -0x76:i64
             jump by T2:i64 always
         ");
 
