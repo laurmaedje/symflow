@@ -1,5 +1,5 @@
 
-block:     file format elf64-x86-64
+block-first:     file format elf64-x86-64
 
 
 Disassembly of section .text:
@@ -40,7 +40,7 @@ Disassembly of section .text:
  2f3:	55                   	push   rbp
  2f4:	48 89 e5             	mov    rbp,rsp
  2f7:	48 83 ec 10          	sub    rsp,0x10
- 2fb:	c7 45 f8 0a 00 00 00 	mov    DWORD PTR [rbp-0x8],0xa
+ 2fb:	c7 45 f8 03 00 00 00 	mov    DWORD PTR [rbp-0x8],0x3
  302:	83 7d f8 04          	cmp    DWORD PTR [rbp-0x8],0x4
  306:	7f 09                	jg     311 <main+0x1e>
  308:	c7 45 fc 0f 00 00 00 	mov    DWORD PTR [rbp-0x4],0xf

@@ -1,6 +1,4 @@
 //! Parses the ELF file format.
-//!
-//! (Currently assumes 64-bit little endian).
 
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::fmt::{self, Debug, Display, Formatter};
@@ -182,7 +180,6 @@ fn parse_section_headers<R>(header: Header, target: &mut R)
 
     Ok(headers)
 }
-
 
 /// Error type for ELF loading.
 pub enum ElfError {

@@ -1,59 +1,49 @@
 //! Simulation of micro code.
 
 use std::collections::{HashMap, HashSet};
-use std::ops::{Add, Sub, Mul, Div, BitAnd, BitOr, Not};
-use std::fmt::{self, Debug, Display, Formatter};
-use std::ops::{self, Index, IndexMut};
+use std::ops::{Index, IndexMut, Not};
 
 use crate::Program;
-use crate::amd64::{Register, Flag};
+use crate::amd64::Register;
 use crate::ir::{MicroOperation, Location, Condition, Temporary, MemoryMapped};
-use crate::num::{DataType, Integer};
+use crate::num::{DataType, Integer, Flags};
 
 
 /// Simulates an execution.
 #[derive(Debug)]
-pub struct Simulator {
+pub struct Simulator<'p> {
     base: u64,
     ip: u64,
-    program: Program,
+    program: &'p Program,
     spaces: [MemorySpace; 2],
+    flags: Flags,
     temporaries: HashMap<usize, Integer>,
     break_points: HashSet<u64>,
 }
 
-impl Simulator {
+impl<'p> Simulator<'p> {
     /// Create a new simulator.
-    pub fn new() -> Simulator {
+    pub fn new(base: u64, entry_point: u64, program: &'p Program) -> Simulator<'p> {
         let main_memory = MemorySpace::new((0x0, 0x8000_0000_0000_0000 - 1));
         let registers = MemorySpace::new((0x0, 0x200));
-        Simulator {
-            base: 0,
-            ip: 0,
-            program: Program::empty(),
+
+        let mut sim = Simulator {
+            base,
+            ip: entry_point,
+            program,
             spaces: [main_memory, registers],
+            flags: Flags::default(),
             temporaries: HashMap::new(),
             break_points: HashSet::new(),
-        }
-    }
+        };
 
-    /// Load a microcode program at an address.
-    pub fn load(&mut self, base: u64, entry_point: u64, program: Program) {
-        // Reset temporaries, spaces and break points.
-        self.temporaries.clear();
-        self.break_points.clear();
-        self.spaces[0].clear();
-        self.spaces[1].clear();
-
-        // Set up the program and program counter.
-        self.base = base;
-        self.program = program;
-        self.jump(entry_point);
-
-        // Set up the stack.
+        // Set up the program counter and stack.
         let stack_start = ptr(0x7fff_ffff_0000_0000);
-        self.set_reg(Register::RSP, stack_start);
-        self.set_reg(Register::RBP, stack_start);
+        sim.set_reg(Register::RIP, ptr(entry_point));
+        sim.set_reg(Register::RSP, stack_start);
+        sim.set_reg(Register::RBP, stack_start);
+
+        sim
     }
 
     /// Add a one-time breakpoint at an address.
@@ -71,9 +61,9 @@ impl Simulator {
 
         // Reset the temporaries and load the next instruction.
         self.temporaries.clear();
-        let (len, inst, microcode) = self.program.mapping[&(self.ip - self.base)].clone();
+        let (len, _, microcode) = self.program.mapping[&(self.ip - self.base)].clone();
 
-        // Adjust the
+        // Adjust the instruction pointer already.
         self.jump(self.ip + len);
 
         for op in microcode.ops {
@@ -92,7 +82,7 @@ impl Simulator {
     }
 
     /// Execute instructions until there is an error or exit.
-    fn run(&mut self) {
+    pub fn run(&mut self) {
         loop {
             if let Some(event) = self.step() {
                 match event {
@@ -110,43 +100,41 @@ impl Simulator {
         match op {
             Op::Mov { dest, src } => self.do_move(dest, src),
             Op::Const { dest, constant } => self.write_location(dest, constant),
-            Op::Cast { target, new } => {
-                let new_value = self.get_temp(target).cast(new);
+            Op::Cast { target, new, signed } => {
+                let new_value = self.get_temp(target).cast(new, signed);
                 self.set_temp(Temporary(new, target.1), new_value);
             },
 
-            Op::Add { sum, a, b, flags } => self.do_binop(sum, a, b, Add::add, flags),
-            Op::Sub { diff, a, b, flags } => self.do_binop(diff, a, b, Sub::sub, flags),
-            Op::Mul { prod, a, b, flags } => self.do_binop(prod, a, b, Mul::mul, flags),
+            Op::Add { sum, a, b, flags } => self.do_binop(sum, a, b, flags, Integer::flagged_add),
+            Op::Sub { diff, a, b, flags } => self.do_binop(diff, a, b, flags, Integer::flagged_sub),
+            Op::Mul { prod, a, b, flags } => self.do_binop(prod, a, b, flags, Integer::flagged_mul),
 
-            Op::And { and, a, b, flags } => self.do_binop(and, a, b, BitAnd::bitand, flags),
-            Op::Or { or, a, b, flags } => self.do_binop(or, a, b, BitOr::bitor, flags),
+            Op::And { and, a, b, flags } => self.do_binop(and, a, b, flags, Integer::flagged_and),
+            Op::Or { or, a, b, flags } => self.do_binop(or, a, b, flags, Integer::flagged_or),
             Op::Not { not, a } => self.do_unop(not, a, Not::not),
 
             Op::Set { target, condition } => {
                 let bit = self.evaluate_condition(condition);
-                self.set_temp(target, Integer(DataType::U8, bit as u64));
+                self.set_temp(target, Integer(DataType::N8, bit as u64));
             },
             Op::Jump { target, condition, relative } => {
                 if self.evaluate_condition(condition) {
                     let value = self.get_temp(target);
+                    assert_eq!(value.0, DataType::N64, "jump address has to be 64-bit");
 
-                    let mut addr = value.1;
                     return Some(Event::Jump(if relative {
-                        assert_eq!(value.0, DataType::I64, "relative address has to be i64");
                         self.ip.wrapping_add(value.1)
                     } else {
-                        assert_eq!(value.0, DataType::U64, "absolute address has to be u64");
                         value.1
                     }))
                 }
             },
 
             Op::Syscall => {
-                let value = self.get_reg(Register::RAX, false).1;
+                let value = self.get_reg(Register::RAX).1;
                 match value {
                     // Exit syscall
-                    60 => return Some(Event::Exit),
+                    0x3c => return Some(Event::Exit),
                     _ => panic!("unimplemented syscall: {:#x}", value),
                 }
             },
@@ -156,15 +144,21 @@ impl Simulator {
     }
 
     /// Do a binary operation on temporaries.
-    fn do_binop<F>(&mut self, target: Temporary, a: Temporary, b: Temporary, binop: F, flags: bool)
-    where F: FnOnce(Integer, Integer) -> Integer {
+    fn do_binop<F>(&mut self, target: Temporary, a: Temporary, b: Temporary, flags: bool, binop: F)
+     where F: FnOnce(Integer, Integer) -> (Integer, Flags) {
         let data_type = target.0;
-        assert!(data_type == a.0 && data_type == b.0, "incompatible data types for binop");
+        assert!(data_type == a.0 && data_type == b.0,
+            "do_binop: incompatible data types for binop");
 
         let left = self.get_temp(a);
         let right = self.get_temp(b);
-        let result = binop(left, right);
+        let (result, result_flags) = binop(left, right);
         self.set_temp(target, result);
+
+        // Set the flags if requested.
+        if flags {
+            self.flags = result_flags;
+        }
     }
 
     /// Do a unary operation on temporaries.
@@ -177,20 +171,27 @@ impl Simulator {
 
     /// Move a value from a location to another location.
     fn do_move(&mut self, dest: Location, src: Location) {
-        assert_eq!(dest.data_type(), src.data_type(), "incompatible data types for move");
+        assert_eq!(dest.data_type(), src.data_type(),
+            "do_move: incompatible data types for move");
         let value = self.read_location(src);
+
         self.write_location(dest, value);
     }
 
     /// Evaluate a condition.
     fn evaluate_condition(&self, condition: Condition) -> bool {
-        use {Condition::*, Flag::*};
         match condition {
-            Always => true,
-            Equal => self.get_flag(Zero),
-            Less => self.get_flag(Sign) != self.get_flag(Overflow),
-            Greater => !self.get_flag(Zero) && (self.get_flag(Sign) == self.get_flag(Overflow)),
+            Condition::Always => true,
+            Condition::Equal => self.flags.zero,
+            Condition::Less => self.flags.sign != self.flags.overflow,
+            Condition::Greater => !self.flags.zero && (self.flags.sign == self.flags.overflow),
         }
+    }
+
+    /// Jump to an address.
+    fn jump(&mut self, addr: u64) {
+        self.ip = addr;
+        self.set_reg(Register::RIP, ptr(addr));
     }
 
     /// Retrieve data from a location.
@@ -202,7 +203,7 @@ impl Simulator {
             },
             Location::Indirect(data_type, space, temp) => {
                 let addr = self.get_temp(temp);
-                assert_eq!(addr.0, DataType::U64, "address has to be u64");
+                assert_eq!(addr.0, DataType::N64, "read_location: address has to be 64-bit");
                 self.read_location(Location::Direct(data_type, space, addr.1))
             }
         }
@@ -210,57 +211,43 @@ impl Simulator {
 
     /// Write data to a location.
     fn write_location(&mut self, dest: Location, value: Integer) {
+        assert_eq!(dest.data_type(), value.0,
+            "write_location: incompatible data types for write");
+
         match dest {
             Location::Temp(temp) => self.set_temp(temp, value),
-            Location::Direct(data_type, space, addr) => {
+            Location::Direct(_, space, addr) => {
                 self.spaces[space].write_int(addr, value);
             },
             Location::Indirect(data_type, space, temp) => {
                 let addr = self.get_temp(temp);
-                assert_eq!(addr.0, DataType::U64, "address has to be u64");
+                assert_eq!(addr.0, DataType::N64, "write_location: address has to be 64-bit");
                 self.write_location(Location::Direct(data_type, space, addr.1), value)
             }
         }
     }
 
-    /// Jump to an address.
-    fn jump(&mut self, addr: u64) {
-        self.ip = addr;
-        self.set_reg(Register::IP, ptr(addr));
-    }
-
     /// Return the integer stored in the temporary.
     fn get_temp(&self, temp: Temporary) -> Integer {
         let integer = self.temporaries[&temp.1];
-        assert_eq!(integer.0, temp.0, "wrong load type for temporary");
+        assert_eq!(integer.0, temp.0, "get_temp: incompatible data types");
         integer
     }
 
     /// Set the temporary to a new value.
     fn set_temp(&mut self, temp: Temporary, value: Integer) {
-        assert_eq!(temp.0, value.0, "wrong write type for temporary");
+        assert_eq!(temp.0, value.0, "set_temp: incompatible data types");
         self.temporaries.insert(temp.1, value);
     }
 
     /// Get a value from a register.
-    fn get_reg(&self, reg: Register, signed: bool) -> Integer {
-        let data_type = DataType::from_width(reg.width(), signed);
-        self.spaces[1].read_int(reg.address(), data_type)
+    fn get_reg(&self, reg: Register) -> Integer {
+        self.spaces[1].read_int(reg.address(), reg.data_type())
     }
 
     /// Set a register to a value.
     fn set_reg(&mut self, reg: Register, value: Integer) {
         self.spaces[1].write_int(reg.address(), value);
-    }
-
-    /// Get the truth value of a flag.
-    fn get_flag(&self, flag: Flag) -> bool {
-        self.spaces[1][flag.address()] != 0
-    }
-
-    /// Set the truth value of a flag.
-    fn set_flag(&mut self, flag: Flag, value: bool) {
-        self.spaces[1][flag.address()] = value as u8;
     }
 }
 
@@ -303,7 +290,7 @@ impl MemorySpace {
 
     /// Read an integer from an address.
     pub fn read_int(&self, addr: u64, data_type: DataType) -> Integer {
-        let bytes = self.read(addr, data_type.width().bytes());
+        let bytes = self.read(addr, data_type.bytes());
         Integer::from_bytes(data_type, &bytes)
     }
 
@@ -330,7 +317,7 @@ impl Index<u64> for MemorySpace {
         if self.bounded(address) {
             self.map.get(&address).unwrap_or(&0)
         } else {
-            panic!("memory (get) access out of bounds: {:#x}", address);
+            panic!("memory access out of bounds: {:#x}", address);
         }
     }
 }
@@ -340,42 +327,37 @@ impl IndexMut<u64> for MemorySpace {
         if self.bounded(address) {
             self.map.entry(address).or_insert(0)
         } else {
-            panic!("memory (get mut) access out of bounds: {:#x}", address);
+            panic!("mutable memory access out of bounds: {:#x}", address);
         }
     }
 }
 
-/// Create an U64 integer.
+/// Create an 64-bit integer.
 fn ptr(addr: u64) -> Integer {
-    Integer(DataType::U64, addr)
+    Integer(DataType::N64, addr)
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::*;
     use crate::elf::*;
 
     fn test(file: &str, variable: u32) {
         // Read the text section from the binary file.
-        let bin = std::fs::read(file).unwrap();
-        let mut file = ElfFile::from_slice(&bin).unwrap();
+        let mut file = ElfFile::new(std::fs::File::open(file).unwrap()).unwrap();
         let text = file.get_section(".text").unwrap();
-
-        // Disassemble the whole code and print it.
-        let code = Code::new(text.header.addr, &text.data);
-        let program = code.disassemble_program().unwrap();
+        let program = Program::new(&text).unwrap();
 
         // Run a simulation.
         let base = 0x400000;
-        let mut simulator = Simulator::new();
-        simulator.load(base, base + file.header.entry, program);
+        let mut simulator = Simulator::new(base, base + file.header.entry, &program);
         simulator.add_break_point(base + 0x345);
         simulator.run();
 
         // Check that the variable `c` has the correct value.
-        let addr = simulator.get_reg(Register::RBP, false).1 - 0xc;
-        let c = simulator.spaces[0].read_int(addr, DataType::U32).1 as u32;
+        let addr = simulator.get_reg(Register::RBP).1 - 0xc;
+        let c = simulator.spaces[0].read_int(addr, DataType::N32).1 as u32;
         assert_eq!(simulator.ip, 0x400345);
         assert_eq!(c, variable);
     }
@@ -383,5 +365,6 @@ mod tests {
     #[test]
     fn simulate() {
         test("test/block-first", 0xdeadbeef);
+        test("test/block-second", 0xbeefdead);
     }
 }

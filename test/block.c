@@ -13,7 +13,8 @@ void second(int* c) {
 }
 
 void main() {
-    int a = 10, b, c;
+    int a = 3; // 3 for first, 7 for second
+    int b, c;
 
     if (a < 5) {
         b = 15;
