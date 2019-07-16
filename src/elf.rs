@@ -1,4 +1,4 @@
-//! Parses the ELF file format.
+//! Parsing of the 64-bit `ELF` file format.
 
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::fmt::{self, Debug, Display, Formatter};
@@ -6,8 +6,16 @@ use std::ffi::CStr;
 use byteorder::{ReadBytesExt, LE};
 
 
-/// Header of an ELF file.
-#[derive(Debug, Copy, Clone)]
+/// Handle for an `ELF` file.
+#[derive(Debug)]
+pub struct ElfFile<R> where R: Read + Seek {
+    target: R,
+    pub header: Header,
+    pub section_headers: Vec<SectionHeader>,
+}
+
+/// Header of a file.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Header {
     pub identification: [u8; 16],
     pub file_type: u16,
@@ -25,8 +33,15 @@ pub struct Header {
     pub section_name_string_table_index: u16,
 }
 
-/// Section header table.
-#[derive(Debug, Clone)]
+/// Section in the file.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Section {
+    pub header: SectionHeader,
+    pub data: Vec<u8>,
+}
+
+/// Header of a single section.
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SectionHeader {
     pub name: String,
     pub name_offset: u32,
@@ -41,23 +56,8 @@ pub struct SectionHeader {
     pub entry_size: u64,
 }
 
-/// Section in the ELF file.
-#[derive(Debug, Clone)]
-pub struct Section {
-    pub header: SectionHeader,
-    pub data: Vec<u8>,
-}
-
-/// Parses an ELF file.
-#[derive(Debug)]
-pub struct ElfFile<R> where R: Read + Seek {
-    target: R,
-    pub header: Header,
-    pub section_headers: Vec<SectionHeader>,
-}
-
 impl<R> ElfFile<R> where R: Read + Seek {
-    /// Create a new ELF file operating on a reader.
+    /// Create a new `ELF` file operating on a reader.
     pub fn new(mut target: R) -> ElfResult<ElfFile<R>> {
         let header = parse_header(&mut target)?;
         let section_headers = parse_section_headers(header, &mut target)?;
@@ -95,7 +95,7 @@ impl<R> ElfFile<R> where R: Read + Seek {
 }
 
 impl<'a> ElfFile<Cursor<&'a [u8]>> {
-    /// Create a new ELF reader operating on a byte slice.
+    /// Create a new `ELF` file over a byte slice.
     pub fn from_slice(target: &'a [u8]) -> ElfResult<ElfFile<Cursor<&'a [u8]>>> {
         ElfFile::new(Cursor::new(target))
     }
@@ -124,7 +124,7 @@ fn parse_header<R>(target: &mut R) -> ElfResult<Header> where R: Read + Seek {
         section_name_string_table_index: target.read_u16::<LE>()?,
     };
 
-    // Assure that this is ELF, 64-bit and little endian.
+    // Assure that this is `ELF`, 64-bit and little endian.
     // If not we don't know how to handle it and would return complete garbage.
     assert_eq!(&header.identification[0..4], b"\x7fELF");
     assert_eq!(header.identification[4], 2);
@@ -181,13 +181,15 @@ fn parse_section_headers<R>(header: Header, target: &mut R)
     Ok(headers)
 }
 
-/// Error type for ELF loading.
+
+/// The error type for `ELF` loading.
 pub enum ElfError {
     MissingSection(String),
     Io(io::Error),
 }
 
-type ElfResult<T> = Result<T, ElfError>;
+/// The result type for `ELF` loading.
+pub(in super) type ElfResult<T> = Result<T, ElfError>;
 impl std::error::Error for ElfError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -200,8 +202,8 @@ impl std::error::Error for ElfError {
 impl Display for ElfError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            ElfError::MissingSection(name) => write!(f, "Missing section: {}", name),
-            ElfError::Io(err) => write!(f, "I/O error: {}", err),
+            ElfError::MissingSection(name) => write!(f, "missing section: {}", name),
+            ElfError::Io(err) => write!(f, "i/o-error: {}", err),
         }
     }
 }

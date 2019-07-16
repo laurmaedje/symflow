@@ -1,21 +1,58 @@
-//! Microcode representation of instructions.
+//! Microcode encoding of instructions.
 
 use std::fmt::{self, Debug, Display, Formatter};
-use std::mem;
 use crate::amd64::{Instruction, Mnemoic, Operand, Register};
 use crate::num::{DataType, Integer};
 
 
-/// Microcode composed of any number of micro operations.
-#[derive(Debug, Clone, PartialEq)]
+/// A sequence of micro operations.
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Microcode {
     pub ops: Vec<MicroOperation>,
+}
+
+/// A minimal executable action.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum MicroOperation {
+    /// Store the value at location `src` in location `dest`.
+    Mov { dest: Location, src: Location },
+    /// Store a constant in location `dest`.
+    Const { dest: Location, constant: Integer },
+    /// Cast the temporary `target` to another type.
+    /// - If the target type is smaller, it will get truncated.
+    /// - If the target type is bigger, if signed is true the value will be
+    ///   sign-extended and otherwise zero-extended.
+    Cast { target: Temporary, new: DataType, signed: bool },
+
+    /// Store the sum of `a` and `b` in `sum`. Set flags if active.
+    Add { sum: Temporary, a: Temporary, b: Temporary },
+    /// Store the difference of `a` and `b` in `diff`. Set flags if active.
+    Sub { diff: Temporary, a: Temporary, b: Temporary },
+    /// Store the product of `a` and `b` in `prod`. Set flags if active.
+    Mul { prod: Temporary, a: Temporary, b: Temporary },
+
+    /// Store the bitwise AND of `a` and `b` in and. Set flags if active.
+    And { and: Temporary, a: Temporary, b: Temporary },
+    /// Store the bitwise OR of `a` and `b` in or. Set flags if active.
+    Or { or: Temporary, a: Temporary, b: Temporary },
+    /// Store the bitwise NOT of `a` in `not`.
+    Not { not: Temporary, a: Temporary },
+
+    /// Set the target temporary to one if the condition is true and to zero otherwise.
+    Set { target: Temporary, condition: Condition },
+    /// Jump to the current address plus the `offset` if `relative` is true,
+    /// otherwise directly to the target if the condition specified by `condition`
+    /// is fulfilled.
+    Jump { target: Temporary, condition: Condition, relative: bool },
+
+    /// Perform a syscall.
+    Syscall,
 }
 
 /// Encodes instructions into microcode.
 #[derive(Debug, Clone)]
 pub struct MicroEncoder {
-    pub ops: Vec<MicroOperation>,
+    ops: Vec<MicroOperation>,
     temps: usize,
     last_comparison: Option<Comparison>,
 }
@@ -30,15 +67,8 @@ impl MicroEncoder {
         }
     }
 
-    /// Clear the operations but keep the context.
-    pub fn finish(&mut self) -> Microcode {
-        let mut ops = Vec::new();
-        mem::swap(&mut ops, &mut self.ops);
-        Microcode { ops }
-    }
-
-    /// Encode the instruction into microcode.
-    pub fn encode(&mut self, inst: &Instruction) -> EncodeResult<()> {
+    /// Encode an instruction into microcode.
+    pub fn encode(&mut self, inst: &Instruction) -> EncodeResult<Microcode> {
         use MicroOperation as Op;
         use Mnemoic::*;
 
@@ -139,10 +169,12 @@ impl MicroEncoder {
             Nop => {},
         }
 
-        Ok(())
+        let mut ops = Vec::new();
+        std::mem::swap(&mut ops, &mut self.ops);
+        Ok(Microcode { ops })
     }
 
-    /// Encode a binary operation like add or subtract.
+    /// Encode a binary operation like an add or a subtract.
     fn encode_binop<F>(&mut self, inst: &Instruction, binop: F) -> (Temporary, Temporary)
     where F: FnOnce(Temporary, Temporary, Temporary) -> MicroOperation {
         let ((dest, left), (_, right)) = self.encode_load_both(inst);
@@ -155,21 +187,6 @@ impl MicroEncoder {
         self.ops.push(MicroOperation::Mov { dest, src: Location::Temp(target) });
 
         (left, right)
-    }
-
-    fn encode_load_both(&mut self, inst: &Instruction)
-    -> ((Location, Temporary), (Location, Temporary)) {
-        // Encode the loading of both operands into a temporary.
-        let (dest, left) = self.encode_load_operand(inst.operands[0]);
-        let (src, mut right) = self.encode_load_operand(inst.operands[1]);
-
-        // Enforce that both operands have the exact same data type.
-        if left.0 != right.0 {
-            self.ops.push(MicroOperation::Cast { target: right, new: left.0, signed: true });
-            right.0 = left.0;
-        }
-
-        ((dest, left), (src, right))
     }
 
     /// Encode a relative jump.
@@ -185,7 +202,7 @@ impl MicroEncoder {
         }
     }
 
-    /// Encode a set instruction.
+    /// Encode a set instruction, which sets a bit based on a condition.
     fn encode_set(&mut self, operand: Operand, condition: Condition) {
         let location = self.encode_get_location(operand);
         let temp = Temporary(location.data_type(), self.temps);
@@ -194,8 +211,7 @@ impl MicroEncoder {
         self.encode_move(location, Location::Temp(temp)).unwrap();
     }
 
-    /// Load the stack pointer, decrement it by the operand size, store the
-    /// operand on the stack and store the new stack pointer in the register.
+    /// Enocde a push instruction.
     fn encode_push(&mut self, src: Location) {
         // Load the stack pointer.
         let (sp, stack) = self.encode_load_operand(Operand::Direct(Register::RSP));
@@ -217,8 +233,7 @@ impl MicroEncoder {
         self.encode_move(sp, Location::Temp(stack)).unwrap();
     }
 
-    /// Load the operand from the stack, load the stack pointer, increment it
-    /// by the operand size and store the new stack pointer in the register.
+    /// Enocde a pop instruction.
     fn encode_pop(&mut self, dest: Location) {
         // Load the stack pointer.
         let (sp, stack) = self.encode_load_operand(Operand::Direct(Register::RSP));
@@ -238,17 +253,25 @@ impl MicroEncoder {
         self.encode_move(sp, Location::Temp(stack)).unwrap();
     }
 
-    /// Encode moving with a cast to the destination source type.
-    fn encode_move_casted(&mut self, inst: &Instruction, signed: bool) {
-        let dest = self.encode_get_location(inst.operands[0]);
-        let (_, mut temp) = self.encode_load_operand(inst.operands[1]);
-        let new = dest.data_type();
-        self.ops.push(MicroOperation::Cast { target: temp, new, signed });
-        temp.0 = new;
-        self.encode_move(dest, Location::Temp(temp)).unwrap();
+    /// Encode the operations to load both operands of a binary instruction and return
+    /// the locations and temporaries that the operands where loaded into.
+    /// Casts the second operand to the type of the first one if necessary.
+    fn encode_load_both(&mut self, inst: &Instruction)
+    -> ((Location, Temporary), (Location, Temporary)) {
+        // Encode the loading of both operands into a temporary.
+        let (dest, left) = self.encode_load_operand(inst.operands[0]);
+        let (src, mut right) = self.encode_load_operand(inst.operands[1]);
+
+        // Enforce that both operands have the exact same data type.
+        if left.0 != right.0 {
+            self.ops.push(MicroOperation::Cast { target: right, new: left.0, signed: true });
+            right.0 = left.0;
+        }
+
+        ((dest, left), (src, right))
     }
 
-    /// Encode the micro operations to load the operand into a temporary.
+    /// Encode the loading of an operand into a temporary.
     fn encode_load_operand(&mut self, operand: Operand) -> (Location, Temporary) {
         let location = self.encode_get_location(operand);
         if let Location::Temp(temp) = location {
@@ -261,7 +284,7 @@ impl MicroEncoder {
         }
     }
 
-    /// Encode the micro operations to prepare the location of the operand.
+    /// Encode the micro operations necessary to prepare the location of the operand.
     /// The operand itself will not be loaded and the operations may be empty
     /// if it is a direct operand.
     fn encode_get_location(&mut self, operand: Operand) -> Location {
@@ -308,7 +331,7 @@ impl MicroEncoder {
         }
     }
 
-    /// Encode the micro operations to load a register from memory into a temporary.
+    /// Encode the loading of a register from memory into a temporary.
     /// The resulting temporary will have the data type matching the registers width.
     fn encode_load_reg(&mut self, reg: Register) -> Temporary {
         let data_type = reg.data_type();
@@ -321,7 +344,7 @@ impl MicroEncoder {
         temp
     }
 
-    /// Encode the micro operations to load a constant into a temporary.
+    /// Encode the loading of a constant into a temporary.
     fn encode_load_constant(&mut self, data_type: DataType, constant: u64) -> Temporary {
         let temp = Temporary(data_type, self.temps);
 
@@ -334,21 +357,32 @@ impl MicroEncoder {
         temp
     }
 
-    /// Encode a move operation with check for matching data types.
+    /// Encode moving with a cast to the destination source type.
+    fn encode_move_casted(&mut self, inst: &Instruction, signed: bool) {
+        let dest = self.encode_get_location(inst.operands[0]);
+        let (_, mut temp) = self.encode_load_operand(inst.operands[1]);
+        let new = dest.data_type();
+        self.ops.push(MicroOperation::Cast { target: temp, new, signed });
+        temp.0 = new;
+        self.encode_move(dest, Location::Temp(temp)).unwrap();
+    }
+
+    /// Encode a move operation.
     fn encode_move(&mut self, dest: Location, src: Location) -> EncodeResult<()> {
         // Enforce that both operands have the exact same data type.
         if src.data_type() != dest.data_type() {
-            return Err(EncodeError::new(format!("incompatible data types for move: {} and {}",
+            return Err(EncodingError::new(format!("incompatible data types for move: {} and {}",
                 src.data_type(), dest.data_type())));
         }
+
         Ok(self.ops.push(MicroOperation::Mov { dest, src }))
     }
 
-    /// Get the condition for the last set of flags.
+    /// Get the comparison which matches the last instruction modifying the flags.
     fn get_comparison(&self) -> Comparison {
         match self.last_comparison {
             Some(cmp) => cmp,
-            _ => panic!("get_comparison: jump or set without previous comparison"),
+            _ => panic!("get_comparison: no previous comparison"),
         }
     }
 }
@@ -363,54 +397,6 @@ impl Display for Microcode {
             writeln!(f, "    {}", operation)?;
         }
         write!(f, "]")
-    }
-}
-
-/// Describes one atomic operation.
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub enum MicroOperation {
-    /// Store the value at location `src` in location `dest`.
-    Mov { dest: Location, src: Location },
-    /// Store a constant in location `dest`.
-    Const { dest: Location, constant: Integer },
-    /// Cast the temporary `target` to another type.
-    /// - If the target type is smaller, it will get truncated.
-    /// - If the target type is bigger, if signed is true the value will be
-    ///   sign-extended and otherwise zero-extended.
-    Cast { target: Temporary, new: DataType, signed: bool },
-
-    /// Store the sum of `a` and `b` in `sum`. Set flags if active.
-    Add { sum: Temporary, a: Temporary, b: Temporary },
-    /// Store the difference of `a` and `b` in `diff`. Set flags if active.
-    Sub { diff: Temporary, a: Temporary, b: Temporary },
-    /// Store the product of `a` and `b` in `prod`. Set flags if active.
-    Mul { prod: Temporary, a: Temporary, b: Temporary },
-
-    /// Store the bitwise AND of `a` and `b` in and. Set flags if active.
-    And { and: Temporary, a: Temporary, b: Temporary },
-    /// Store the bitwise OR of `a` and `b` in or. Set flags if active.
-    Or { or: Temporary, a: Temporary, b: Temporary },
-    /// Store the bitwise NOT of `a` in `not`.
-    Not { not: Temporary, a: Temporary },
-
-    /// Set the target temporary to one if the condition is true and to zero otherwise.
-    Set { target: Temporary, condition: Condition },
-    /// Jump to the current address plus the `offset` if `relative` is true,
-    /// otherwise directly to the target if the condition specified by `condition`
-    /// is fulfilled.
-    Jump { target: Temporary, condition: Condition, relative: bool },
-
-    /// Perform a syscall.
-    Syscall,
-}
-
-impl MicroOperation {
-    /// Whether this micro operation diverges the control flow.
-    pub fn diverges(&self) -> bool {
-        match self {
-            MicroOperation::Jump { .. } => true,
-            _ => false,
-        }
     }
 }
 
@@ -446,8 +432,8 @@ impl Display for MicroOperation {
     }
 }
 
-/// Strongly typed target for moves.
-#[derive(Debug, Copy, Clone, PartialEq)]
+/// Pinpoints a target in memory or temporaries.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Location {
     Temp(Temporary),
     Direct(DataType, usize, u64),
@@ -455,7 +441,7 @@ pub enum Location {
 }
 
 impl Location {
-    /// Underlying data type of values at the location.
+    /// The underlying data type of the value at the location.
     pub fn data_type(&self) -> DataType {
         match *self {
             Location::Temp(temp) => temp.0,
@@ -476,8 +462,8 @@ impl Display for Location {
     }
 }
 
-/// Strongly typed temporary identified by an index.
-#[derive(Debug, Copy, Clone, PartialEq)]
+/// Temporary variable identified by an index.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub struct Temporary(pub DataType, pub usize);
 
 impl Display for Temporary {
@@ -487,7 +473,7 @@ impl Display for Temporary {
 }
 
 /// Condition for jumps and sets.
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Condition {
     True,
     Equal(Comparison),
@@ -495,8 +481,8 @@ pub enum Condition {
     Less(Comparison),
 }
 
-/// Comparison types for conditions.
-#[derive(Debug, Copy, Clone, PartialEq)]
+/// The comparison type for a condition.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Comparison {
     Add(Temporary, Temporary),
     Sub(Temporary, Temporary),
@@ -525,7 +511,6 @@ impl Display for Comparison {
         }
     }
 }
-
 
 /// Addresses of things stored in memory (registers).
 pub trait MemoryMapped {
@@ -559,30 +544,29 @@ impl MemoryMapped for Register {
     }
 }
 
-/// Error type for microcode encoding.
-#[derive(Eq, PartialEq)]
-pub struct EncodeError {
-    pub message: String,
-}
 
-impl EncodeError {
-    /// Create a new encoding error with a mesage.
-    fn new<S: Into<String>>(message: S) -> EncodeError {
-        EncodeError { message: message.into() }
+/// The error type for microcode encoding.
+#[derive(Eq, PartialEq)]
+pub struct EncodingError(String);
+
+impl EncodingError {
+    /// Create a new encoding error with a message.
+    fn new<S: Into<String>>(message: S) -> EncodingError {
+        EncodingError(message.into())
     }
 }
 
 /// Result type for instruction decoding.
-pub(in super) type EncodeResult<T> = Result<T, EncodeError>;
-impl std::error::Error for EncodeError {}
+pub(in super) type EncodeResult<T> = Result<T, EncodingError>;
+impl std::error::Error for EncodingError {}
 
-impl Display for EncodeError {
+impl Display for EncodingError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Failed to encode instruction: {}.", self.message)
+        write!(f, "failed to encode instruction: {}", self.0)
     }
 }
 
-impl Debug for EncodeError {
+impl Debug for EncodingError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         Display::fmt(self, f)
     }
@@ -600,8 +584,7 @@ mod tests {
 
     fn test_with_encoder(encoder: &mut MicroEncoder, bytes: &[u8], display: &str) {
         let instruction = Instruction::decode(bytes).unwrap();
-        encoder.encode(&instruction).unwrap();
-        let code = encoder.finish();
+        let code = encoder.encode(&instruction).unwrap();
         let display = codify(display);
         println!("==================================");
         println!("bytes: {:#02x?}", bytes);

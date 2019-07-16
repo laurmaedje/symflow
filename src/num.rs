@@ -1,4 +1,4 @@
-//! Generic sized machine integer.
+//! Machine numerics.
 
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Add, Sub, Mul, BitAnd, BitOr, Not};
@@ -7,7 +7,7 @@ use DataType::*;
 
 
 /// Variable data type integer with machine semantics.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct Integer(pub DataType, pub u64);
 
 /// Replicates code for all types.
@@ -53,6 +53,11 @@ macro_rules! flagged {
 }
 
 impl Integer {
+    /// Create a pointer-sized integer.
+    pub fn ptr(value: u64) -> Integer {
+        Integer(N64, value)
+    }
+
     /// Read an integer of a specific type from bytes.
     pub fn from_bytes(data_type: DataType, bytes: &[u8]) -> Integer {
         Integer(data_type, match data_type {
@@ -139,8 +144,8 @@ impl Not for Integer {
     }
 }
 
-/// Basic numeric types.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+/// Different width numeric types.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum DataType {
     N8,
     N16,

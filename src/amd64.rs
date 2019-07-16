@@ -1,11 +1,11 @@
-//! Decodes `amd64` instructions.
+//! Decoding of `AMD64` instructions.
 
 use std::fmt::{self, Debug, Display, Formatter};
 use byteorder::{ByteOrder, LittleEndian};
 use crate::num::DataType;
 
 
-/// Decoded machine code instruction.
+/// A decoded machine code instruction.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Instruction {
     pub bytes: Vec<u8>,
@@ -13,20 +13,43 @@ pub struct Instruction {
     pub operands: Vec<Operand>,
 }
 
+/// Identifies an instruction.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum Mnemoic {
+    Add, Sub, Imul,
+    Mov, Movzx, Lea,
+    Push, Pop,
+    Jmp, Je, Jg, Setl,
+    Call, Leave, Ret,
+    Cmp, Test,
+    Syscall,
+    Nop,
+}
+
+/// An operand in an instruction.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum Operand {
+    Direct(Register),
+    Indirect(DataType, Register),
+    IndirectDisplaced(DataType, Register, i64),
+    Immediate(DataType, u64),
+    Offset(i64),
+}
+
 impl Instruction {
-    /// Tries to decode an instruction from bytes.
+    /// Tries to decode an instruction from raw bytes.
     pub fn decode(bytes: &[u8]) -> DecodeResult<Instruction> {
         Decoder::new(bytes).decode()
     }
 
-    /// The length of the first instruction in the slice.
+    /// The byte length of the first instruction in the given slice.
     pub fn length(bytes: &[u8]) -> u64 {
         lde::X64.ld(bytes) as u64
     }
 }
 
-/// Decodes instructions.
-#[derive(Debug)]
+/// Decodes an instruction.
+#[derive(Debug, Clone)]
 struct Decoder<'a> {
     bytes: &'a [u8],
     index: usize,
@@ -38,7 +61,7 @@ impl<'a> Decoder<'a> {
         Decoder { bytes, index: 0 }
     }
 
-    /// Decode the bytes into an instruction.
+    /// Decodes the bytes into an instruction.
     fn decode(mut self) -> DecodeResult<Instruction> {
         use OperandLayout::*;
 
@@ -47,7 +70,7 @@ impl<'a> Decoder<'a> {
 
         // Parse the opcode.
         let (opcode, operation) = self.decode_opcode(rex);
-        let (mnemoic, op) = operation.ok_or_else(|| DecodeError::new(self.bytes.to_vec()))?;
+        let (mnemoic, op) = operation.ok_or_else(|| DecodingError::new(self.bytes.to_vec()))?;
 
         // Construct the operands.
         let mut operands = Vec::new();
@@ -109,7 +132,7 @@ impl<'a> Decoder<'a> {
         })
     }
 
-    /// Decode the REX prefix.
+    /// Decodes the REX prefix.
     fn decode_rex(&mut self) -> RexPrefix {
         let byte = self.bytes[self.index];
         let rex = (byte ^ 0b01000000) < 16;
@@ -125,7 +148,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    /// Decode the opcode.
+    /// Decodes the opcode.
     fn decode_opcode(&mut self, rex: RexPrefix) -> (&'a [u8], Option<(Mnemoic, OperandLayout)>) {
         use DataType::*;
         use OperandLayout::*;
@@ -149,6 +172,7 @@ impl<'a> Decoder<'a> {
             (byte & 0b00111000) >> 3
         });
 
+        // Handle all the opcodes.
         (opcode, Some(match opcode {
             &[0x01] => (Mnemoic::Add, RegRm(scaled, scaled, false)),
             &[0x03] => (Mnemoic::Add, RegRm(scaled, scaled, true)),
@@ -185,9 +209,7 @@ impl<'a> Decoder<'a> {
         }))
     }
 
-    /// Decodes the ModR/M byte and displacement and returns a
-    /// (reg, rm, offset, bytes_read) quadruple, where bytes denotes how
-    /// many bytes where used from the slice.
+    /// Decodes the ModR/M byte and displacement.
     fn decode_modrm_displaced(&mut self) -> (u8, u8, Option<i64>) {
         let (modus, reg, rm) = self.decode_modrm();
         let displacement = self.decode_displacement(modus);
@@ -204,7 +226,7 @@ impl<'a> Decoder<'a> {
         (modus, reg, rm)
     }
 
-    /// Decodes the displacement and returns an (offset, bytes_read) pair.
+    /// Decodes the displacement if there is any.
     fn decode_displacement(&mut self, modrm_modus: u8) -> Option<i64> {
         let (displace, off) = match modrm_modus {
             0b00 => (Some(0), 0),
@@ -217,8 +239,7 @@ impl<'a> Decoder<'a> {
         displace
     }
 
-    /// Decodes an immediate value with given bit width and returns an
-    /// (immediate, bytes_read) pair.
+    /// Decodes an immediate value with given bit width.
     fn decode_immediate(&mut self, width: DataType) -> u64 {
         use DataType::*;
         let bytes = &self.bytes[self.index ..];
@@ -247,7 +268,7 @@ impl<'a> Decoder<'a> {
     }
 }
 
-/// REX prefix.
+/// A REX prefix.
 #[derive(Debug, Copy, Clone)]
 struct RexPrefix {
     w: bool,
@@ -268,12 +289,12 @@ enum OperandLayout {
     Rel(DataType),
 }
 
-/// Construct an operand from the reg part of ModR/M.
+/// Constructs an operand from the reg part of ModR/M.
 fn construct_modrm_reg(rex_r: bool, reg: u8, reg_w: DataType) -> Operand {
     Operand::Direct(Register::from_bits(rex_r, reg, reg_w))
 }
 
-/// Construct an operand from the rm part of ModR/M with a displacement.
+/// Constructs an operand from the rm part of ModR/M with a displacement.
 fn construct_modrm_rm(rex_b: bool, rm: u8, reg_w: DataType, displace: Option<i64>) -> Operand {
     let direct = Register::from_bits(rex_b, rm, reg_w);
     let indirect = Register::from_bits(rex_b, rm, DataType::N64);
@@ -297,32 +318,10 @@ impl Display for Instruction {
     }
 }
 
-/// Describes an instruction.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum Mnemoic {
-    Add, Sub, Imul,
-    Mov, Movzx, Lea,
-    Push, Pop,
-    Jmp, Je, Jg, Call, Leave, Ret,
-    Cmp, Test, Setl,
-    Syscall,
-    Nop,
-}
-
 impl Display for Mnemoic {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "{}", format!("{:?}", self).to_lowercase())
     }
-}
-
-/// Operand in an instruction.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum Operand {
-    Direct(Register),
-    Indirect(DataType, Register),
-    IndirectDisplaced(DataType, Register, i64),
-    Immediate(DataType, u64),
-    Offset(i64),
 }
 
 impl Display for Operand {
@@ -364,7 +363,7 @@ impl Display for Register {
 }
 
 impl Register {
-    /// Data type of the register.
+    /// The data type (bit width) of the register.
     pub fn data_type(&self) -> DataType {
         use Register::*;
         match self {
@@ -401,30 +400,28 @@ impl Register {
     }
 }
 
-/// Error type for instruction decoding.
-#[derive(Eq, PartialEq)]
-pub struct DecodeError {
-    pub bytes: Vec<u8>,
-}
 
-impl DecodeError {
+/// The error type for instruction decoding.
+pub struct DecodingError(Vec<u8>);
+
+impl DecodingError {
     /// Create a new decoding error from bytes.
-    fn new(bytes: Vec<u8>) -> DecodeError {
-        DecodeError { bytes }
+    fn new(bytes: Vec<u8>) -> DecodingError {
+        DecodingError(bytes)
     }
 }
 
-/// Result type for instruction decoding.
-pub(in super) type DecodeResult<T> = Result<T, DecodeError>;
-impl std::error::Error for DecodeError {}
+/// The result type for instruction decoding.
+pub(in super) type DecodeResult<T> = Result<T, DecodingError>;
+impl std::error::Error for DecodingError {}
 
-impl Display for DecodeError {
+impl Display for DecodingError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Failed to decode instruction bytes {:02x?}.", self.bytes)
+        write!(f, "failed to decode instruction: {:02x?}", self.0)
     }
 }
 
-impl Debug for DecodeError {
+impl Debug for DecodingError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         Display::fmt(self, f)
     }
@@ -491,7 +488,6 @@ mod tests {
         test(&[0x01, 0xd0], "add eax, edx");
         test(&[0x0f, 0xaf, 0x45, 0xfc], "imul eax, dword ptr [rbp-0x4]");
 
-        assert_eq!(Instruction::decode(&[0x12, 0x34]).unwrap_err(),
-                   DecodeError { bytes: vec![0x12, 0x34] });
+        assert_eq!(Instruction::decode(&[0x12, 0x34]).unwrap_err().0, vec![0x12, 0x34]);
     }
 }

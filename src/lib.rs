@@ -1,4 +1,4 @@
-//! Machine code slicer for the AMD-64 architecture based on symbolic execution. 💻
+//! A machine code slicer 🚀 for the AMD-64 architecture based on symbolic execution.
 
 #![allow(unused)]
 
