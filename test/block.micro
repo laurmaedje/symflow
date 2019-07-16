@@ -1,0 +1,349 @@
+2b1: push rbp
+     | mov T0:n64 = [m1][0x20:n64]
+     | const T1:n64 = 0x8:n64
+     | sub T0:n64 = T0:n64 - T1:n64
+     | mov [m0][(T0:n64):n64] = [m1][0x28:n64]
+     | mov [m1][0x20:n64] = T0:n64
+
+2b2: mov rbp, rsp
+     | mov [m1][0x28:n64] = [m1][0x20:n64]
+
+2b5: mov dword ptr [rbp-0x4], edi
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffffc:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov [m0][(T2:n64):n32] = [m1][0x38:n32]
+
+2b8: mov dword ptr [rbp-0x8], esi
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffff8:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov [m0][(T2:n64):n32] = [m1][0x30:n32]
+
+2bb: mov eax, dword ptr [rbp-0x4]
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffffc:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov [m1][0x0:n32] = [m0][(T2:n64):n32]
+
+2be: cmp eax, dword ptr [rbp-0x8]
+     | mov T0:n32 = [m1][0x0:n32]
+     | mov T1:n64 = [m1][0x28:n64]
+     | const T2:n64 = 0xfffffffffffffff8:n64
+     | add T3:n64 = T1:n64 + T2:n64
+     | mov T4:n32 = [m0][(T3:n64):n32]
+     | sub[flags] T5:n32 = T0:n32 - T4:n32
+
+2c1: setl al
+     | set T0:n8 if less
+     | mov [m1][0x0:n8] = T0:n8
+
+2c4: movzx eax, al
+     | mov T0:n8 = [m1][0x0:n8]
+     | cast T0:n8 to n32 unsigned
+     | mov [m1][0x0:n32] = T0:n32
+
+2c7: pop rbp
+     | mov T0:n64 = [m1][0x20:n64]
+     | mov [m1][0x28:n64] = [m0][(T0:n64):n64]
+     | const T1:n64 = 0x8:n64
+     | add T0:n64 = T0:n64 + T1:n64
+     | mov [m1][0x20:n64] = T0:n64
+
+2c8: ret
+     | mov T1:n64 = [m1][0x20:n64]
+     | mov T0:n64 = [m0][(T1:n64):n64]
+     | const T2:n64 = 0x8:n64
+     | add T1:n64 = T1:n64 + T2:n64
+     | mov [m1][0x20:n64] = T1:n64
+     | jump to T0:n64 always
+
+2c9: push rbp
+     | mov T0:n64 = [m1][0x20:n64]
+     | const T1:n64 = 0x8:n64
+     | sub T0:n64 = T0:n64 - T1:n64
+     | mov [m0][(T0:n64):n64] = [m1][0x28:n64]
+     | mov [m1][0x20:n64] = T0:n64
+
+2ca: mov rbp, rsp
+     | mov [m1][0x28:n64] = [m1][0x20:n64]
+
+2cd: mov qword ptr [rbp-0x8], rdi
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffff8:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov [m0][(T2:n64):n64] = [m1][0x38:n64]
+
+2d1: mov rax, qword ptr [rbp-0x8]
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffff8:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov [m1][0x0:n64] = [m0][(T2:n64):n64]
+
+2d5: mov dword ptr [rax], 0xdeadbeef
+     | mov T0:n64 = [m1][0x0:n64]
+     | const T1:n32 = 0xdeadbeef:n32
+     | mov [m0][(T0:n64):n32] = T1:n32
+
+2db: nop
+
+2dc: pop rbp
+     | mov T0:n64 = [m1][0x20:n64]
+     | mov [m1][0x28:n64] = [m0][(T0:n64):n64]
+     | const T1:n64 = 0x8:n64
+     | add T0:n64 = T0:n64 + T1:n64
+     | mov [m1][0x20:n64] = T0:n64
+
+2dd: ret
+     | mov T1:n64 = [m1][0x20:n64]
+     | mov T0:n64 = [m0][(T1:n64):n64]
+     | const T2:n64 = 0x8:n64
+     | add T1:n64 = T1:n64 + T2:n64
+     | mov [m1][0x20:n64] = T1:n64
+     | jump to T0:n64 always
+
+2de: push rbp
+     | mov T0:n64 = [m1][0x20:n64]
+     | const T1:n64 = 0x8:n64
+     | sub T0:n64 = T0:n64 - T1:n64
+     | mov [m0][(T0:n64):n64] = [m1][0x28:n64]
+     | mov [m1][0x20:n64] = T0:n64
+
+2df: mov rbp, rsp
+     | mov [m1][0x28:n64] = [m1][0x20:n64]
+
+2e2: mov qword ptr [rbp-0x8], rdi
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffff8:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov [m0][(T2:n64):n64] = [m1][0x38:n64]
+
+2e6: mov rax, qword ptr [rbp-0x8]
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffff8:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov [m1][0x0:n64] = [m0][(T2:n64):n64]
+
+2ea: mov dword ptr [rax], 0xbeefdead
+     | mov T0:n64 = [m1][0x0:n64]
+     | const T1:n32 = 0xbeefdead:n32
+     | mov [m0][(T0:n64):n32] = T1:n32
+
+2f0: nop
+
+2f1: pop rbp
+     | mov T0:n64 = [m1][0x20:n64]
+     | mov [m1][0x28:n64] = [m0][(T0:n64):n64]
+     | const T1:n64 = 0x8:n64
+     | add T0:n64 = T0:n64 + T1:n64
+     | mov [m1][0x20:n64] = T0:n64
+
+2f2: ret
+     | mov T1:n64 = [m1][0x20:n64]
+     | mov T0:n64 = [m0][(T1:n64):n64]
+     | const T2:n64 = 0x8:n64
+     | add T1:n64 = T1:n64 + T2:n64
+     | mov [m1][0x20:n64] = T1:n64
+     | jump to T0:n64 always
+
+2f3: push rbp
+     | mov T0:n64 = [m1][0x20:n64]
+     | const T1:n64 = 0x8:n64
+     | sub T0:n64 = T0:n64 - T1:n64
+     | mov [m0][(T0:n64):n64] = [m1][0x28:n64]
+     | mov [m1][0x20:n64] = T0:n64
+
+2f4: mov rbp, rsp
+     | mov [m1][0x28:n64] = [m1][0x20:n64]
+
+2f7: sub rsp, 0x10
+     | mov T0:n64 = [m1][0x20:n64]
+     | const T1:n8 = 0x10:n8
+     | cast T1:n8 to n64 signed
+     | sub[flags] T2:n64 = T0:n64 - T1:n64
+     | mov [m1][0x20:n64] = T2:n64
+
+2fb: mov dword ptr [rbp-0x8], 0x3
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffff8:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | const T3:n32 = 0x3:n32
+     | mov [m0][(T2:n64):n32] = T3:n32
+
+302: cmp dword ptr [rbp-0x8], 0x4
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffff8:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov T3:n32 = [m0][(T2:n64):n32]
+     | const T4:n8 = 0x4:n8
+     | cast T4:n8 to n32 signed
+     | sub[flags] T5:n32 = T3:n32 - T4:n32
+
+306: jg +0x9
+     | const T0:n64 = 0x9:n64
+     | jump by T0:n64 if greater
+
+308: mov dword ptr [rbp-0x4], 0xf
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffffc:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | const T3:n32 = 0xf:n32
+     | mov [m0][(T2:n64):n32] = T3:n32
+
+30f: jmp +0x7
+     | const T0:n64 = 0x7:n64
+     | jump by T0:n64 always
+
+311: mov dword ptr [rbp-0x4], 0x5
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffffc:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | const T3:n32 = 0x5:n32
+     | mov [m0][(T2:n64):n32] = T3:n32
+
+318: mov edx, dword ptr [rbp-0x4]
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffffc:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov [m1][0x10:n32] = [m0][(T2:n64):n32]
+
+31b: mov eax, dword ptr [rbp-0x8]
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffff8:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov [m1][0x0:n32] = [m0][(T2:n64):n32]
+
+31e: mov esi, edx
+     | mov [m1][0x30:n32] = [m1][0x10:n32]
+
+320: mov edi, eax
+     | mov [m1][0x38:n32] = [m1][0x0:n32]
+
+322: call -0x76
+     | mov T0:n64 = [m1][0x20:n64]
+     | const T1:n64 = 0x8:n64
+     | sub T0:n64 = T0:n64 - T1:n64
+     | mov [m0][(T0:n64):n64] = [m1][0x80:n64]
+     | mov [m1][0x20:n64] = T0:n64
+     | const T2:n64 = 0xffffffffffffff8a:n64
+     | jump by T2:n64 always
+
+327: test eax, eax
+     | mov T0:n32 = [m1][0x0:n32]
+     | mov T1:n32 = [m1][0x0:n32]
+     | and[flags] T2:n32 = T0:n32 & T1:n32
+
+329: je +0xe
+     | const T0:n64 = 0xe:n64
+     | jump by T0:n64 if equal
+
+32b: lea rax, qword ptr [rbp-0xc]
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffff4:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov [m1][0x0:n64] = T2:n64
+
+32f: mov rdi, rax
+     | mov [m1][0x38:n64] = [m1][0x0:n64]
+
+332: call -0x6e
+     | mov T0:n64 = [m1][0x20:n64]
+     | const T1:n64 = 0x8:n64
+     | sub T0:n64 = T0:n64 - T1:n64
+     | mov [m0][(T0:n64):n64] = [m1][0x80:n64]
+     | mov [m1][0x20:n64] = T0:n64
+     | const T2:n64 = 0xffffffffffffff92:n64
+     | jump by T2:n64 always
+
+337: jmp +0xc
+     | const T0:n64 = 0xc:n64
+     | jump by T0:n64 always
+
+339: lea rax, qword ptr [rbp-0xc]
+     | mov T0:n64 = [m1][0x28:n64]
+     | const T1:n64 = 0xfffffffffffffff4:n64
+     | add T2:n64 = T0:n64 + T1:n64
+     | mov [m1][0x0:n64] = T2:n64
+
+33d: mov rdi, rax
+     | mov [m1][0x38:n64] = [m1][0x0:n64]
+
+340: call -0x67
+     | mov T0:n64 = [m1][0x20:n64]
+     | const T1:n64 = 0x8:n64
+     | sub T0:n64 = T0:n64 - T1:n64
+     | mov [m0][(T0:n64):n64] = [m1][0x80:n64]
+     | mov [m1][0x20:n64] = T0:n64
+     | const T2:n64 = 0xffffffffffffff99:n64
+     | jump by T2:n64 always
+
+345: nop
+
+346: leave
+     | mov [m1][0x20:n64] = [m1][0x28:n64]
+     | mov T0:n64 = [m1][0x20:n64]
+     | mov [m1][0x28:n64] = [m0][(T0:n64):n64]
+     | const T1:n64 = 0x8:n64
+     | add T0:n64 = T0:n64 + T1:n64
+     | mov [m1][0x20:n64] = T0:n64
+
+347: ret
+     | mov T1:n64 = [m1][0x20:n64]
+     | mov T0:n64 = [m0][(T1:n64):n64]
+     | const T2:n64 = 0x8:n64
+     | add T1:n64 = T1:n64 + T2:n64
+     | mov [m1][0x20:n64] = T1:n64
+     | jump to T0:n64 always
+
+348: push rbp
+     | mov T0:n64 = [m1][0x20:n64]
+     | const T1:n64 = 0x8:n64
+     | sub T0:n64 = T0:n64 - T1:n64
+     | mov [m0][(T0:n64):n64] = [m1][0x28:n64]
+     | mov [m1][0x20:n64] = T0:n64
+
+349: mov rbp, rsp
+     | mov [m1][0x28:n64] = [m1][0x20:n64]
+
+34c: mov eax, 0x0
+     | const T0:n32 = 0x0:n32
+     | mov [m1][0x0:n32] = T0:n32
+
+351: call -0x63
+     | mov T0:n64 = [m1][0x20:n64]
+     | const T1:n64 = 0x8:n64
+     | sub T0:n64 = T0:n64 - T1:n64
+     | mov [m0][(T0:n64):n64] = [m1][0x80:n64]
+     | mov [m1][0x20:n64] = T0:n64
+     | const T2:n64 = 0xffffffffffffff9d:n64
+     | jump by T2:n64 always
+
+356: mov rax, 0x3c
+     | const T0:n32 = 0x3c:n32
+     | cast T0:n32 to n64 signed
+     | mov [m1][0x0:n64] = T0:n64
+
+35d: mov rdi, 0x0
+     | const T0:n32 = 0x0:n32
+     | cast T0:n32 to n64 signed
+     | mov [m1][0x38:n64] = T0:n64
+
+364: syscall
+     | syscall
+
+366: nop
+
+367: pop rbp
+     | mov T0:n64 = [m1][0x20:n64]
+     | mov [m1][0x28:n64] = [m0][(T0:n64):n64]
+     | const T1:n64 = 0x8:n64
+     | add T0:n64 = T0:n64 + T1:n64
+     | mov [m1][0x20:n64] = T0:n64
+
+368: ret
+     | mov T1:n64 = [m1][0x20:n64]
+     | mov T0:n64 = [m0][(T1:n64):n64]
+     | const T2:n64 = 0x8:n64
+     | add T1:n64 = T1:n64 + T2:n64
+     | mov [m1][0x20:n64] = T1:n64
+     | jump to T0:n64 always

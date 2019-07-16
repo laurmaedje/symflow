@@ -20,8 +20,8 @@ impl Instruction {
     }
 
     /// The length of the first instruction in the slice.
-    pub fn length(bytes: &[u8]) -> usize {
-        lde::X64.ld(bytes) as usize
+    pub fn length(bytes: &[u8]) -> u64 {
+        lde::X64.ld(bytes) as u64
     }
 }
 
