@@ -390,9 +390,7 @@ impl MicroEncoder {
 impl Display for Microcode {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "Microcode [")?;
-        if !self.ops.is_empty() {
-            writeln!(f)?;
-        }
+        if !self.ops.is_empty() { writeln!(f)?; }
         for operation in &self.ops {
             writeln!(f, "    {}", operation)?;
         }
@@ -463,7 +461,7 @@ impl Display for Location {
 }
 
 /// Temporary variable identified by an index.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub struct Temporary(pub DataType, pub usize);
 
 impl Display for Temporary {
@@ -473,7 +471,7 @@ impl Display for Temporary {
 }
 
 /// Condition for jumps and sets.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum Condition {
     True,
     Equal(Comparison),
@@ -482,7 +480,7 @@ pub enum Condition {
 }
 
 /// The comparison type for a condition.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum Comparison {
     Add(Temporary, Temporary),
     Sub(Temporary, Temporary),

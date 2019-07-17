@@ -2,12 +2,13 @@
 
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Add, Sub, Mul, BitAnd, BitOr, Not};
+use std::cmp::{Ord, PartialOrd, Eq, PartialEq, Ordering};
 use byteorder::{ByteOrder, LittleEndian};
 use DataType::*;
 
 
 /// Variable data type integer with machine semantics.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Hash)]
 pub struct Integer(pub DataType, pub u64);
 
 /// Replicates code for all types.
@@ -54,12 +55,17 @@ macro_rules! flagged {
 
 impl Integer {
     /// Create a pointer-sized integer.
-    pub fn ptr(value: u64) -> Integer {
+    pub fn from_ptr(value: u64) -> Integer {
         Integer(N64, value)
     }
 
+    /// Create a boolean-based integer.
+    pub fn from_bool(value: bool, data_type: DataType) -> Integer {
+        Integer(data_type, value as u64)
+    }
+
     /// Read an integer of a specific type from bytes.
-    pub fn from_bytes(data_type: DataType, bytes: &[u8]) -> Integer {
+    pub fn from_bytes(bytes: &[u8], data_type: DataType) -> Integer {
         Integer(data_type, match data_type {
             N8  => bytes[0] as u64,
             N16 => LittleEndian::read_u16(bytes) as u64,
@@ -93,18 +99,16 @@ impl Integer {
         }))
     }
 
+    // Operations with CPU flags.
     flagged!(flagged_add, sum, a, b => wrapping_add, Flags {
         overflow: a.overflowing_add(b).1, .. flags!(sum)
     });
-
     flagged!(flagged_sub, diff, a, b => wrapping_sub, Flags {
         overflow: a.overflowing_sub(b).1, .. flags!(diff)
     });
-
     flagged!(flagged_mul, product, a, b => wrapping_mul, Flags {
         zero: false, sign: false, overflow: a.overflowing_mul(b).1
     });
-
     flagged!(flagged_and, and, a, b => bitand, Flags { overflow: false, .. flags!(and) });
     flagged!(flagged_or, or, a, b => bitor, Flags { overflow: false, .. flags!(or) });
 }
@@ -135,6 +139,29 @@ binary_operation!(Sub, sub, wrapping_sub);
 binary_operation!(Mul, mul, wrapping_mul);
 binary_operation!(BitAnd, bitand, bitand);
 binary_operation!(BitOr, bitor, bitor);
+
+impl Ord for Integer {
+    fn cmp(&self, other: &Integer) -> Ordering {
+        assert_eq!(self.0, other.0, "incompatible data types for integer comparison");
+        typed!(cast => self.0, false, {
+            (cast(self.1).cmp(&cast(other.1)))
+        })
+    }
+}
+
+impl PartialOrd for Integer {
+    fn partial_cmp(&self, other: &Integer) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for Integer {}
+impl PartialEq for Integer {
+    fn eq(&self, other: &Integer) -> bool {
+        assert_eq!(self.0, other.0, "incompatible data types for integer comparison");
+        self.1 == other.1
+    }
+}
 
 impl Not for Integer {
     type Output = Integer;

@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 use std::cell::RefCell;
+use std::fmt::{self, Debug, Display, Formatter};
 use crate::amd64::Register;
-use crate::ir::{MicroOperation, Location, Temporary, Condition, MemoryMapped};
+use crate::ir::{MicroOperation, Location, Temporary, Condition, Comparison, MemoryMapped};
 use crate::num::{Integer, DataType};
 use self::SymExpr::*;
 
@@ -25,9 +26,10 @@ impl SymState {
     }
 
     /// Execute a micro operation.
-    pub fn step(&mut self, operation: MicroOperation) -> Option<Event> {
+    pub fn step(&mut self, addr: u64, operation: MicroOperation) -> Option<Event> {
         use MicroOperation as Op;
 
+        self.set_reg(Register::RIP, Int(Integer::from_ptr(addr)));
         match operation {
             Op::Mov { dest, src } => self.do_move(dest, src),
             Op::Const { dest, constant } => self.write_location(dest, SymExpr::Int(constant)),
@@ -36,17 +38,23 @@ impl SymState {
                 self.set_temp(Temporary(new, target.1), new_value);
             },
 
-            Op::Add { sum, a, b } => self.set_temp(sum, self.get_temp(a).add(self.get_temp(b))),
-            Op::Sub { diff, a, b } => self.set_temp(diff, self.get_temp(a).sub(self.get_temp(b))),
-            Op::Mul { prod, a, b } => self.set_temp(prod, self.get_temp(a).mul(self.get_temp(b))),
+            Op::Add { sum, a, b } => self.do_binop(sum, a, b, SymExpr::add),
+            Op::Sub { diff, a, b } => self.do_binop(diff, a, b, SymExpr::sub),
+            Op::Mul { prod, a, b } => self.do_binop(prod, a, b, SymExpr::mul),
 
-            Op::And { and, a, b } => unimplemented!("and"),
-            Op::Or { or, a, b } => unimplemented!("or"),
-            Op::Not { not, a } => unimplemented!("not"),
+            Op::And { and, a, b } => self.do_binop(and, a, b, SymExpr::and),
+            Op::Or { or, a, b } => self.do_binop(or, a, b, SymExpr::or),
+            Op::Not { not, a } => self.set_temp(not, self.get_temp(a).not()),
 
-            Op::Set { target, condition } => unimplemented!("set"),
+            Op::Set { target, condition } => {
+                self.set_temp(target, self.evaluate(condition, target.0));
+            },
             Op::Jump { target, condition, relative } => {
-                return Some(Event::Jump { target: self.get_temp(target), condition, relative });
+                return Some(Event::Jump {
+                    target: self.get_temp(target),
+                    condition: self.evaluate(condition, DataType::N8),
+                    relative
+                });
             },
 
             Op::Syscall => {
@@ -65,6 +73,12 @@ impl SymState {
         None
     }
 
+    /// Do a binary operation.
+    fn do_binop<F>(&mut self, target: Temporary, a: Temporary, b: Temporary, binop: F)
+    where F: FnOnce(SymExpr, SymExpr) -> SymExpr {
+        self.set_temp(target, binop(self.get_temp(a), self.get_temp(b)));
+    }
+
     /// Move a value from a location to another location.
     fn do_move(&mut self, dest: Location, src: Location) {
         assert_eq!(dest.data_type(), src.data_type(),
@@ -72,6 +86,21 @@ impl SymState {
         let value = self.read_location(src);
 
         self.write_location(dest, value);
+    }
+
+    /// Evaulate a condition.
+    fn evaluate(&self, condition: Condition, data_type: DataType) -> SymExpr {
+        use Condition::*;
+        use Comparison as Cmp;
+        match condition {
+            True => Int(Integer(data_type, 1)),
+            Equal(Cmp::Sub(a, b)) => self.get_temp(a).equals(self.get_temp(b), data_type),
+            Greater(Cmp::Sub(a, b)) => self.get_temp(a).greater(self.get_temp(b), data_type),
+            Less(Cmp::Sub(a, b)) => self.get_temp(a).less(self.get_temp(b), data_type),
+            Equal(Cmp::And(a, b)) => self.get_temp(a).and(self.get_temp(b))
+                .equals(Int(Integer(a.0, 0)), data_type),
+            _ => panic!("evaluate: unhandled condition/comparison"),
+        }
     }
 
     /// Retrieve data from a location.
@@ -136,7 +165,7 @@ impl SymState {
 /// Events occuring during symbolic execution.
 #[derive(Debug, Clone)]
 pub enum Event {
-    Jump { target: SymExpr, condition: Condition, relative: bool },
+    Jump { target: SymExpr, condition: SymExpr, relative: bool },
     Exit,
 }
 
@@ -169,7 +198,7 @@ impl SymMemory {
 
     /// Read from a direct address.
     pub fn read_direct(&self, addr: u64, data_type: DataType) -> SymExpr {
-        self.read_expr(SymExpr::Int(Integer::ptr(addr)), data_type)
+        self.read_expr(SymExpr::Int(Integer::from_ptr(addr)), data_type)
     }
 
     /// Read from a symbolic address.
@@ -188,7 +217,7 @@ impl SymMemory {
 
     /// Write a value to a direct address.
     pub fn write_direct(&mut self, addr: u64, value: SymExpr) {
-        self.write_expr(SymExpr::Int(Integer::ptr(addr)), value)
+        self.write_expr(SymExpr::Int(Integer::from_ptr(addr)), value)
     }
 
     /// Write a value to a symbolic address.
@@ -197,15 +226,73 @@ impl SymMemory {
     }
 }
 
+impl Display for SymMemory {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "SymMemory [")?;
+        let data = self.data.borrow();
+        if !data.map.is_empty() { writeln!(f)?; }
+        for (location, value) in &data.map {
+            writeln!(f, "    {} => {}", location, value)?;
+        }
+        writeln!(f, "]")
+    }
+}
+
 /// A possibly composed symbolic expression.
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum SymExpr {
     Int(Integer),
     Sym(Symbol),
     Add(Box<SymExpr>, Box<SymExpr>),
     Sub(Box<SymExpr>, Box<SymExpr>),
     Mul(Box<SymExpr>, Box<SymExpr>),
-    Cast(Box<SymExpr>, DataType, bool)
+    And(Box<SymExpr>, Box<SymExpr>),
+    Or(Box<SymExpr>, Box<SymExpr>),
+    Not(Box<SymExpr>),
+    Less(Box<SymExpr>, Box<SymExpr>, DataType),
+    Equals(Box<SymExpr>, Box<SymExpr>, DataType),
+    Greater(Box<SymExpr>, Box<SymExpr>, DataType),
+    Cast(Box<SymExpr>, DataType, bool),
+}
+
+macro_rules! bin_expr {
+    ($func:ident, $op:tt, $variant:ident) => {
+        pub fn $func(self, other: SymExpr) -> SymExpr {
+            match (self, other) {
+                (Int(a), Int(b)) => Int(a $op b),
+                (a, b) => $variant(Box::new(a), Box::new(b)),
+            }
+        }
+    };
+}
+
+macro_rules! bin_expr_simplifying {
+    ($func:ident, $a:ident, $b:ident, $target:expr) => {
+        pub fn $func(self, other: SymExpr) -> SymExpr {
+            fn boxed(expr: SymExpr) -> Box<SymExpr> { Box::new(expr) }
+            fn add_or_sub(expr: SymExpr, a: Integer, b: Integer) -> SymExpr {
+                if a > b {
+                    Add(boxed(expr), boxed(Int(a - b)))
+                } else {
+                    Sub(boxed(expr), boxed(Int(b - a)))
+                }
+            }
+            let $a = self;
+            let $b = other;
+            $target
+        }
+    };
+}
+
+macro_rules! cmp_expr {
+    ($func:ident, $op:ident, $variant:ident) => {
+        pub fn $func(self, other: SymExpr, data_type: DataType) -> SymExpr {
+            match (self, other) {
+                (Int(a), Int(b)) => Int(Integer::from_bool(a.$op(&b), data_type)),
+                (a, b) => $variant(Box::new(a), Box::new(b), data_type),
+            }
+        }
+    };
 }
 
 impl SymExpr {
@@ -217,30 +304,72 @@ impl SymExpr {
             Add(a, _) => a.data_type(),
             Sub(a, _) => a.data_type(),
             Mul(a, _) => a.data_type(),
+            And(a, _) => a.data_type(),
+            Or(a, _) => a.data_type(),
+            Not(a) => a.data_type(),
             Cast(_, new, _) => *new,
+            Less(_, _, d) => *d,
+            Equals(_, _, d) => *d,
+            Greater(_, _, d) => *d,
         }
     }
 
-    pub fn add(self, other: SymExpr) -> SymExpr {
-        match (self, other) {
-            (Int(a), Int(b)) => Int(a + b),
-            (a, b) => Add(Box::new(a), Box::new(b)),
+    // Add and simplify.
+    bin_expr_simplifying!(add, a, b, match (a, b) {
+        (a, Int(Integer(_, 0))) | (Int(Integer(_, 0)), a) => a,
+        (Int(a), Int(b)) => Int(a + b),
+        (Int(a), Add(b, c)) | (Add(b, c), Int(a)) => match (*b, *c) {
+            (Int(b), c) | (c, Int(b)) => Add(boxed(c), boxed(Int(a + b))),
+            (b, c) => Add(boxed(b), boxed(c)),
+        },
+        (Int(a), Sub(b, c)) | (Sub(b, c), Int(a)) => match (*b, *c) {
+            (b, Int(c)) => add_or_sub(b, a, c),
+            (Int(b), c) => Sub(boxed(Int(a + b)), boxed(c)),
+            (b, c) => Add(boxed(b), boxed(c)),
+        }
+        (a, b) => Add(boxed(a), boxed(b)),
+    });
+
+    // Subtract and simplify.
+    bin_expr_simplifying!(sub, a, b, match (a, b) {
+        (a, Int(Integer(_, 0))) | (Int(Integer(_, 0)), a) => a,
+        (Int(a), Int(b)) => Int(a - b),
+        (Int(a), Sub(b, c)) => match (*b, *c) {
+            (Int(b), c) => add_or_sub(c, a, b),
+            (b, Int(c)) => Sub(boxed(Int(a + c)), boxed(b)),
+            (b, c) => Sub(boxed(b), boxed(c)),
+        },
+        (Sub(a, b), Int(c)) => match (*a, *b) {
+            (Int(a), b) => Sub(boxed(Int(a - c)), boxed(b)),
+            (a, Int(b)) => Sub(boxed(a), boxed(Int(b + c))),
+            (a, b) => Sub(boxed(a), boxed(b)),
+        },
+        (Int(a), Add(b, c)) => match (*b, *c) {
+            (Int(b), c) => Sub(boxed(Int(a - b)), boxed(c)),
+            (b, Int(c)) => Sub(boxed(Int(a + c)), boxed(b)),
+            (b, c) => Sub(boxed(b), boxed(c)),
+        },
+        (Add(a, b), Int(c)) => match (*a, *b) {
+            (Int(a), b) | (b, Int(a)) => add_or_sub(b, a, c),
+            (a, b) => Sub(boxed(a), boxed(b)),
+        }
+        (a, b) => Sub(boxed(a), boxed(b)),
+    });
+
+    bin_expr!(mul, *, Mul);
+    bin_expr!(and, &, And);
+    bin_expr!(or, *, Or);
+
+    pub fn not(self) -> SymExpr {
+        match self {
+            Int(x) => Int(!x),
+            x => Not(Box::new(x)),
         }
     }
 
-    pub fn sub(self, other: SymExpr) -> SymExpr {
-        match (self, other) {
-            (Int(a), Int(b)) => Int(a - b),
-            (a, b) => Sub(Box::new(a), Box::new(b)),
-        }
-    }
-
-    pub fn mul(self, other: SymExpr) -> SymExpr {
-        match (self, other) {
-            (Int(a), Int(b)) => Int(a * b),
-            (a, b) => Mul(Box::new(a), Box::new(b)),
-        }
-    }
+    cmp_expr!(less, lt, Less);
+    cmp_expr!(equals, eq, Equals);
+    cmp_expr!(greater, gt, Greater);
 
     pub fn cast(self, new: DataType, signed: bool) -> SymExpr {
         match self {
@@ -250,6 +379,67 @@ impl SymExpr {
     }
 }
 
+impl Display for SymExpr {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Int(int) => write!(f, "{}", int),
+            Sym(sym) => write!(f, "{}", sym),
+            Add(a, b) => write!(f, "({} + {})", a, b),
+            Sub(a, b) => write!(f, "({} - {})", a, b),
+            Mul(a, b) => write!(f, "({} * {})", a, b),
+            And(a, b) => write!(f, "({} & {})", a, b),
+            Or(a, b) => write!(f, "({} | {})", a, b),
+            Not(a) => write!(f, "(!{})", a),
+            Less(a, b, d) => write!(f, "({} < {} [{}])", a, b, d),
+            Equals(a, b, d) => write!(f, "({} == {} [{}])", a, b, d),
+            Greater(a, b, d) => write!(f, "({} > {} [{}])", a, b, d),
+            Cast(x, new, signed) => write!(f, "({} as {}{})", x, new,
+                if *signed { " signed "} else { "" }),
+        }
+    }
+}
+
 /// A symbol value identified by an index.
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub struct Symbol(pub DataType, pub usize);
+
+impl Display for Symbol {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "s{}:{}", self.1, self.0)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::num::{Integer, DataType::*};
+
+    #[test]
+    fn expr() {
+        let zero = || Int(Integer(N64, 0));
+        let five = || Int(Integer(N64, 5));
+        let eight = || Int(Integer(N64, 8));
+        let ten = || Int(Integer(N64, 10));
+        let fifteen  = || Int(Integer(N64, 15));
+        let x = || Sym(Symbol(N64, 0));
+
+        assert_eq!(x().add(zero()), x());
+        assert_eq!(ten().add(zero()), ten());
+
+        assert_eq!(x().add(five()).add(ten()),
+            Add(Box::new(x()), Box::new(fifteen())));
+
+        assert_eq!(x().sub(five()).add(ten()),
+            Add(Box::new(x()), Box::new(five())));
+
+        assert_eq!(x().sub(ten()).sub(five()),
+            Sub(Box::new(x()), Box::new(fifteen())));
+
+        assert_eq!(x().add(ten()).sub(five()),
+            Add(Box::new(x()), Box::new(five())));
+
+        assert_eq!(x().sub(eight()).sub(eight()).add(eight()),
+            Sub(Box::new(x()), Box::new(Int(Integer(N64, 8)))));
+    }
+}
