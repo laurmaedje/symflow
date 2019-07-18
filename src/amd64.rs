@@ -17,9 +17,9 @@ pub struct Instruction {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Mnemoic {
     Add, Sub, Imul,
-    Mov, Movzx, Lea,
+    Mov, Movzx, Movsx, Lea,
     Push, Pop,
-    Jmp, Je, Jg, Setl,
+    Jmp, Je, Jle, Jg, Setl,
     Call, Leave, Ret,
     Cmp, Test,
     Syscall,
@@ -176,20 +176,24 @@ impl<'a> Decoder<'a> {
         (opcode, Some(match opcode {
             &[0x01] => (Mnemoic::Add, RegRm(scaled, scaled, false)),
             &[0x03] => (Mnemoic::Add, RegRm(scaled, scaled, true)),
+            &[0x83] if ext == Some(0) => (Mnemoic::Add, RmIm(scaled, N8)),
             &[0x83] if ext == Some(5) => (Mnemoic::Sub, RmIm(scaled, N8)),
             &[0x0f, 0xaf] => (Mnemoic::Imul, RegRm(scaled, scaled, true)),
 
             &[x] if 0x50 <= x && x < 0x58 => (Mnemoic::Push, Plus(0x50, N64)),
             &[x] if 0x58 <= x && x < 0x60 => (Mnemoic::Pop, Plus(0x58, N64)),
 
+            &[0x88] => (Mnemoic::Mov, RegRm(N8, N8, false)),
             &[0x89] => (Mnemoic::Mov, RegRm(scaled, scaled, false)),
             &[0x8b] => (Mnemoic::Mov, RegRm(scaled, scaled, true)),
             &[0xc7] => (Mnemoic::Mov, RmIm(scaled, N32)),
             &[x] if 0xb8 <= x && x < 0xc0 => (Mnemoic::Mov, PlusIm(0xb8, scaled, scaled)),
             &[0x0f, 0xb6] => (Mnemoic::Movzx, RegRm(scaled, N8, true)),
+            &[0x0f, 0xbe] => (Mnemoic::Movsx, RegRm(scaled, N8, true)),
 
             &[0x8d] => (Mnemoic::Lea, RegRm(scaled, scaled, true)),
 
+            &[0x80] if ext == Some(7) => (Mnemoic::Cmp, RmIm(N8, N8)),
             &[0x83] if ext == Some(7) => (Mnemoic::Cmp, RmIm(scaled, N8)),
             &[0x3b] => (Mnemoic::Cmp, RegRm(scaled, scaled, true)),
             &[0x85] => (Mnemoic::Test, RegRm(scaled, scaled, true)),
@@ -197,6 +201,7 @@ impl<'a> Decoder<'a> {
 
             &[0x7f] =>(Mnemoic::Jg, Rel(N8)),
             &[0x74] =>(Mnemoic::Je, Rel(N8)),
+            &[0x7e] =>(Mnemoic::Jle, Rel(N8)),
             &[0xeb] =>(Mnemoic::Jmp, Rel(N8)),
             &[0xe8] =>(Mnemoic::Call, Rel(N16)),
 
@@ -440,6 +445,11 @@ mod tests {
     #[test]
     fn decode() {
         test(&[0x4c, 0x03, 0x47, 0x0a], "add r8, qword ptr [rdi+0xa]");
+        test(&[0x88, 0x45, 0xec], "mov byte ptr [rbp-0x14], al");
+        test(&[0x83, 0xc0, 0x01], "add eax, 0x1");
+        test(&[0x0f, 0xbe, 0xc0], "movsx eax, al");
+        test(&[0x80, 0x7d, 0xff, 0x60], "cmp byte ptr [rbp-0x1], 0x60");
+        test(&[0x7e, 0x19], "jle +0x19");
 
         test(&[0x55], "push rbp");
         test(&[0x48, 0x89, 0xe5], "mov rbp, rsp");

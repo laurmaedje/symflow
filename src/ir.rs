@@ -1,6 +1,7 @@
 //! Microcode encoding of instructions.
 
 use std::fmt::{self, Debug, Display, Formatter};
+use crate::elf::Section;
 use crate::amd64::{Instruction, Mnemoic, Operand, Register};
 use crate::num::{DataType, Integer};
 
@@ -102,6 +103,7 @@ impl MicroEncoder {
 
             // Load the source, cast it to the destination type and move it there.
             Movzx => self.encode_move_casted(inst, false),
+            Movsx => self.encode_move_casted(inst, true),
 
             // Retrieve both locations, but instead of loading just move the
             // address into the destination.
@@ -130,6 +132,7 @@ impl MicroEncoder {
             Jmp => self.encode_jump(inst.operands[0], Condition::True),
             Je => self.encode_jump(inst.operands[0], Condition::Equal(self.get_comparison())),
             Jg => self.encode_jump(inst.operands[0], Condition::Greater(self.get_comparison())),
+            Jle => self.encode_jump(inst.operands[0], Condition::LessEqual(self.get_comparison())),
 
             // Save the procedure linking information on the stack and jump.
             Call => {
@@ -477,6 +480,7 @@ pub enum Condition {
     Equal(Comparison),
     Greater(Comparison),
     Less(Comparison),
+    LessEqual(Comparison),
 }
 
 /// The comparison type for a condition.
@@ -495,6 +499,7 @@ impl Display for Condition {
             Condition::Equal(com) => write!(f, "{} equal", com),
             Condition::Greater(com) => write!(f, "{} greater", com),
             Condition::Less(com) => write!(f, "{} less", com),
+            Condition::LessEqual(com) => write!(f, "{} less/equal", com),
         }
     }
 }
@@ -542,6 +547,54 @@ impl MemoryMapped for Register {
     }
 }
 
+/// A microcode representation of a whole program.
+#[derive(Debug, Clone)]
+pub struct Disassembly {
+    pub instructions: Vec<(u64, Instruction, Microcode)>,
+}
+
+impl Disassembly {
+    /// Create a new program from an ELF file.
+    pub fn new(text: &Section) -> Disassembly {
+        let base = text.header.addr;
+        let code = &text.data;
+
+        let mut instructions = Vec::new();
+        let mut index = 0;
+
+        let mut encoder = MicroEncoder::new();
+        while index < code.len() as u64 {
+            let len = Instruction::length(&code[index as usize ..]);
+            let bytes = &code[index as usize .. (index + len) as usize];
+            let instruction = Instruction::decode(bytes).unwrap();
+            let microcode = encoder.encode(&instruction).unwrap();
+            instructions.push((base + index, instruction, microcode));
+            index += len;
+        }
+
+        Disassembly { instructions }
+    }
+}
+
+impl Display for Disassembly {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "Disassembly [")?;
+        if !self.instructions.is_empty() { writeln!(f)?; }
+        let mut start = true;
+        for (addr, instruction, microcode) in &self.instructions {
+            if !start { writeln!(f)?; }
+            start = false;
+            writeln!(f, "    {:x}: {}", addr, instruction)?;
+            for line in microcode.to_string().lines() {
+                if !line.starts_with("Microcode") && line != "]" {
+                    writeln!(f, "         | {}", &line[4..])?;
+                }
+            }
+        }
+        write!(f, "]")
+    }
+}
+
 
 /// The error type for microcode encoding.
 #[derive(Eq, PartialEq)]
@@ -573,8 +626,24 @@ impl Debug for EncodingError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+    use crate::elf::ElfFile;
     use crate::amd64::*;
     use super::*;
+
+    fn disassemble_file(filename: &str) {
+        let mut file = ElfFile::new(File::open(filename).unwrap()).unwrap();
+        let text = file.get_section(".text").unwrap();
+        let disasm = Disassembly::new(&text);
+        println!("{}", disasm);
+    }
+
+    #[test]
+    fn disassemble() {
+        disassemble_file("test/block-1");
+        disassemble_file("test/block-2");
+        disassemble_file("test/read");
+    }
 
     fn test(bytes: &[u8], display: &str) {
         test_with_encoder(&mut MicroEncoder::new(), bytes, display);

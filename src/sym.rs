@@ -59,13 +59,11 @@ impl SymState {
 
             Op::Syscall => {
                 if let SymExpr::Int(int) = self.get_reg(Register::RAX) {
-                    match int.1 {
-                        // Exit syscall
-                        0x3c => return Some(Event::Exit),
-                        s => panic!("unimplemented syscall: {:#x}", s),
+                    if let Some(event) = self.do_syscall(int.1) {
+                        return Some(event);
                     }
                 } else {
-                    panic!("step: unhandled symbolic syscall");
+                    panic!("step: unhandled symbolic syscall number");
                 }
             },
         }
@@ -88,18 +86,52 @@ impl SymState {
         self.write_location(dest, value);
     }
 
+    /// Emulate a linux syscall.
+    fn do_syscall(&mut self, num: u64) -> Option<Event> {
+        match num {
+            // Read from file descriptor.
+            0 => {
+                let fd = self.get_reg(Register::RDI);
+                let buf = self.get_reg(Register::RSI);
+                let count = self.get_reg(Register::RDX);
+                let byte_count = match count {
+                    Int(Integer(DataType::N64, bytes)) => bytes,
+                    _ => panic!("do_syscall: read: unknown byte count"),
+                };
+
+                for i in 0 .. byte_count {
+                    let target = buf.clone().add(Int(Integer(DataType::N64, i)));
+                    let value = Sym(self.memory[0].new_symbol(DataType::N8));
+                    self.memory[0].write_expr(target, value);
+                }
+            },
+
+            // Write to file descriptor.
+            1 => {},
+
+            // System exit
+            60 => return Some(Event::Exit),
+            s => panic!("do_syscall: unimplemented syscall number {}", s),
+        }
+        None
+    }
+
     /// Evaulate a condition.
     fn evaluate(&self, condition: Condition, data_type: DataType) -> SymExpr {
         use Condition::*;
         use Comparison as Cmp;
         match condition {
             True => Int(Integer(data_type, 1)),
-            Equal(Cmp::Sub(a, b)) => self.get_temp(a).equals(self.get_temp(b), data_type),
+
+            Equal(Cmp::Sub(a, b)) => self.get_temp(a).equal(self.get_temp(b), data_type),
             Greater(Cmp::Sub(a, b)) => self.get_temp(a).greater(self.get_temp(b), data_type),
             Less(Cmp::Sub(a, b)) => self.get_temp(a).less(self.get_temp(b), data_type),
+            LessEqual(Cmp::Sub(a, b)) => self.get_temp(a).less_equal(self.get_temp(b), data_type),
+
             Equal(Cmp::And(a, b)) => self.get_temp(a).and(self.get_temp(b))
-                .equals(Int(Integer(a.0, 0)), data_type),
-            _ => panic!("evaluate: unhandled condition/comparison"),
+                .equal(Int(Integer(a.0, 0)), data_type),
+
+            _ => panic!("evaluate: unhandled condition/comparison pair"),
         }
     }
 
@@ -205,7 +237,11 @@ impl SymMemory {
     pub fn read_expr(&self, addr: SymExpr, data_type: DataType) -> SymExpr {
         let mut data = self.data.borrow_mut();
         match data.map.get(&addr) {
-            Some(expr) => expr.clone(),
+            Some(expr) => if expr.data_type() == data_type {
+                expr.clone()
+            } else {
+                expr.clone().cast(data_type, false)
+            },
             None => {
                 let value = SymExpr::Sym(Symbol(data_type, data.symbols));
                 data.map.insert(addr, value.clone());
@@ -223,6 +259,13 @@ impl SymMemory {
     /// Write a value to a symbolic address.
     pub fn write_expr(&mut self, addr: SymExpr, value: SymExpr) {
         self.data.borrow_mut().map.insert(addr, value);
+    }
+
+    /// Generate a new symbol.
+    pub fn new_symbol(&mut self, data_type: DataType) -> Symbol {
+        let mut data = self.data.borrow_mut();
+        data.symbols += 1;
+        Symbol(data_type, data.symbols - 1)
     }
 }
 
@@ -249,9 +292,11 @@ pub enum SymExpr {
     And(Box<SymExpr>, Box<SymExpr>),
     Or(Box<SymExpr>, Box<SymExpr>),
     Not(Box<SymExpr>),
+    Equal(Box<SymExpr>, Box<SymExpr>, DataType),
     Less(Box<SymExpr>, Box<SymExpr>, DataType),
-    Equals(Box<SymExpr>, Box<SymExpr>, DataType),
+    LessEqual(Box<SymExpr>, Box<SymExpr>, DataType),
     Greater(Box<SymExpr>, Box<SymExpr>, DataType),
+    GreaterEqual(Box<SymExpr>, Box<SymExpr>, DataType),
     Cast(Box<SymExpr>, DataType, bool),
 }
 
@@ -308,9 +353,11 @@ impl SymExpr {
             Or(a, _) => a.data_type(),
             Not(a) => a.data_type(),
             Cast(_, new, _) => *new,
+            Equal(_, _, d) => *d,
             Less(_, _, d) => *d,
-            Equals(_, _, d) => *d,
+            LessEqual(_, _, d) => *d,
             Greater(_, _, d) => *d,
+            GreaterEqual(_, _, d) => *d,
         }
     }
 
@@ -367,9 +414,11 @@ impl SymExpr {
         }
     }
 
+    cmp_expr!(equal, eq, Equal);
     cmp_expr!(less, lt, Less);
-    cmp_expr!(equals, eq, Equals);
+    cmp_expr!(less_equal, le, LessEqual);
     cmp_expr!(greater, gt, Greater);
+    cmp_expr!(greater_equal, ge, GreaterEqual);
 
     pub fn cast(self, new: DataType, signed: bool) -> SymExpr {
         match self {
@@ -390,9 +439,11 @@ impl Display for SymExpr {
             And(a, b) => write!(f, "({} & {})", a, b),
             Or(a, b) => write!(f, "({} | {})", a, b),
             Not(a) => write!(f, "(!{})", a),
+            Equal(a, b, d) => write!(f, "({} == {} [{}])", a, b, d),
             Less(a, b, d) => write!(f, "({} < {} [{}])", a, b, d),
-            Equals(a, b, d) => write!(f, "({} == {} [{}])", a, b, d),
+            LessEqual(a, b, d) => write!(f, "({} <= {} [{}])", a, b, d),
             Greater(a, b, d) => write!(f, "({} > {} [{}])", a, b, d),
+            GreaterEqual(a, b, d) => write!(f, "({} >= {} [{}])", a, b, d),
             Cast(x, new, signed) => write!(f, "({} as {}{})", x, new,
                 if *signed { " signed "} else { "" }),
         }

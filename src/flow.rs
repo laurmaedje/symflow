@@ -46,11 +46,15 @@ impl FlowGraph {
             let (block, exit) = parse_block(&binary[start as usize ..], addr, state.clone());
             visited.insert(addr);
 
+            print!("[Block {:#x}]", block.addr);
+
             // Add the possible exits to the stack.
             if let Some(exit) = exit {
                 match exit.target {
                     SymExpr::Int(Integer(DataType::N64, target)) => {
                         let alt_target = addr + block.len;
+
+                        print!(" Condition: {}", exit.condition);
 
                         // Determine which paths are reachable.
                         let mut jmp = false;
@@ -64,17 +68,19 @@ impl FlowGraph {
                             },
                         }
 
-                        if alt && !visited.contains(&alt_target) {
+                        if alt /* && !visited.contains(&alt_target) */ {
                             stack.push((alt_target, exit.state.clone()));
                         }
 
-                        if jmp && !visited.contains(&target) {
+                        if jmp /* && !visited.contains(&target) */ {
                             stack.push((target, exit.state.clone()));
                         }
                     },
-                    _ => panic!("flow graph: unhandled block exit: {}", exit.target),
+                    _ => panic!("flow graph: unhandled jump target: {}", exit.target),
                 }
             }
+
+            println!();
 
             blocks.insert(block.addr, (block, FlowEdges {
                 incoming: vec![],
@@ -82,9 +88,7 @@ impl FlowGraph {
             }));
         }
 
-        FlowGraph {
-            blocks,
-        }
+        FlowGraph { blocks }
     }
 }
 
@@ -176,12 +180,20 @@ mod tests {
     use super::*;
     use crate::elf::ElfFile;
 
+    fn gen(file: &str) {
+        println!("Generating flow graph for <{}>", file);
+        let mut file = ElfFile::new(File::open(file).unwrap()).unwrap();
+        let text = file.get_section(".text").unwrap();
+        let graph = FlowGraph::new(text, file.header.entry);
+        // println!();
+        // println!("flow graph: {}", graph);
+        // println!();
+        println!();
+    }
+
     #[test]
     fn flow() {
-        let mut file = ElfFile::new(File::open("test/block-1").unwrap()).unwrap();
-        let text = file.get_section(".text").unwrap();
-
-        let graph = FlowGraph::new(text, file.header.entry);
-        println!("flow graph: {}", graph);
+        gen("test/block-1");
+        gen("test/read");
     }
 }
