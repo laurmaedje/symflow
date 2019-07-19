@@ -516,6 +516,34 @@ pub enum Comparison {
     And(Temporary, Temporary),
 }
 
+impl Condition {
+    /// Return a more readable version of the condition.
+    pub fn pretty_format(&self, value: bool) -> String {
+        use Condition::*;
+        use Comparison::*;
+        match (self, value) {
+            (True, true) => "True".to_string(),
+            (True, false) => "False".to_string(),
+
+            (Equal(Sub(a, b)), true) => format!("T{} = T{}", a.1, b.1),
+            (Equal(Sub(a, b)), false) => format!("T{} != T{}", a.1, b.1),
+            (Less(Sub(a, b)), true) | (GreaterEqual(Sub(a, b)), false)
+                => format!("T{} < T{}", a.1, b.1),
+            (LessEqual(Sub(a, b)), true) | (Greater(Sub(a, b)), false)
+                => format!("T{} <= T{}", a.1, b.1),
+            (Greater(Sub(a, b)), true) | (LessEqual(Sub(a, b)), false)
+                => format!("T{} > T{}", a.1, b.1),
+            (GreaterEqual(Sub(a, b)), true) | (Less(Sub(a, b)), false)
+                => format!("T{} >= T{}", a.1, b.1),
+
+            (Equal(And(a, b)), true) => format!("T{} & T{} = 0", a.1, b.1),
+            (Equal(And(a, b)), false) => format!("T{} & T{} != 0", a.1, b.1),
+
+            _ => panic!("pretty_format: unhandled condition/comparison/value triple"),
+        }
+    }
+}
+
 impl Display for Condition {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
