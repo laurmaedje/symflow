@@ -1,6 +1,3 @@
-// compile with: gcc -nostdlib -o read read.c
-
-
 // Read one byte from stdin.
 char read_one_byte() {
     char x;

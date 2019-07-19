@@ -684,19 +684,19 @@ mod tests {
     use crate::amd64::*;
     use super::*;
 
+    #[test]
+    fn disassemble() {
+        disassemble_file("target/block-1");
+        disassemble_file("target/block-2");
+        disassemble_file("target/read");
+        disassemble_file("target/paths");
+    }
+
     fn disassemble_file(filename: &str) {
         let mut file = ElfFile::new(File::open(filename).unwrap()).unwrap();
         let text = file.get_section(".text").unwrap();
-        let disasm = Disassembly::new(&text);
-        println!("{}", disasm);
-    }
-
-    #[test]
-    fn disassemble() {
-        disassemble_file("test/block-1");
-        disassemble_file("test/block-2");
-        disassemble_file("test/read");
-        disassemble_file("test/paths");
+        let disassembly = Disassembly::new(&text);
+        println!("{}: {}\n", filename, disassembly);
     }
 
     fn test(bytes: &[u8], display: &str) {
@@ -708,10 +708,9 @@ mod tests {
         let code = encoder.encode(&instruction).unwrap();
         let display = codify(display);
         println!("==================================");
-        println!("bytes: {:#02x?}", bytes);
-        println!("encoded: {}", code);
-        println!("display: {}", display);
-        println!();
+        println!("Instruction: {:#02x?}", bytes);
+        println!("Encoded: {}", code);
+        println!("Display: {}\n", display);
         assert_eq!(code.to_string(), display);
     }
 

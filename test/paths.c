@@ -1,6 +1,3 @@
-// compile with: gcc -nostdlib -o paths paths.c
-
-
 int read() {
     int x;
     int* y = &x;

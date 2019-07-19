@@ -1,6 +1,3 @@
-// compile with: gcc -nostdlib -o block block.c
-
-
 int compare(int a, int b) {
     return a < b;
 }
@@ -14,7 +11,7 @@ void second(int* c) {
 }
 
 void main() {
-    int a = 3; // 3 for first, 7 for second
+    int a = 7; // 3 for first, 7 for second
     int b, c;
 
     if (a < 5) {
