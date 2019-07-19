@@ -126,9 +126,11 @@ fn parse_header<R>(target: &mut R) -> ElfResult<Header> where R: Read + Seek {
 
     // Assure that this is `ELF`, 64-bit and little endian.
     // If not we don't know how to handle it and would return complete garbage.
-    assert_eq!(&header.identification[0..4], b"\x7fELF");
-    assert_eq!(header.identification[4], 2);
-    assert_eq!(header.identification[5], 1);
+    if (&header.identification[0..4] != b"\x7fELF")
+       || (header.identification[4] != 2)
+       || (header.identification[5] != 1) {
+        return Err(ElfError::Invalid);
+    }
 
     Ok(header)
 }
@@ -173,7 +175,8 @@ fn parse_section_headers<R>(header: Header, target: &mut R)
                 zero += 1;
             }
 
-            let name_str = CStr::from_bytes_with_nul(&strings[start .. zero + 1]).unwrap();
+            let name_str = CStr::from_bytes_with_nul(&strings[start .. zero + 1])
+                .expect("invalid C string in elf string table");
             name_str.to_string_lossy().into_owned()
         };
     }
@@ -184,6 +187,7 @@ fn parse_section_headers<R>(header: Header, target: &mut R)
 
 /// The error type for `ELF` loading.
 pub enum ElfError {
+    Invalid,
     MissingSection(String),
     Io(io::Error),
 }
@@ -202,6 +206,7 @@ impl std::error::Error for ElfError {
 impl Display for ElfError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
+            ElfError::Invalid => write!(f, "invalid elf file"),
             ElfError::MissingSection(name) => write!(f, "missing section: {}", name),
             ElfError::Io(err) => write!(f, "i/o-error: {}", err),
         }

@@ -19,9 +19,10 @@ pub enum Mnemoic {
     Add, Sub, Imul,
     Mov, Movzx, Movsx, Lea,
     Push, Pop,
-    Jmp, Je, Jle, Jg, Setl,
+    Jmp, Je, Jl, Jle, Jg, Jge,
     Call, Leave, Ret,
     Cmp, Test,
+    Setl,
     Syscall,
     Nop,
 }
@@ -195,13 +196,16 @@ impl<'a> Decoder<'a> {
 
             &[0x80] if ext == Some(7) => (Mnemoic::Cmp, RmIm(N8, N8)),
             &[0x83] if ext == Some(7) => (Mnemoic::Cmp, RmIm(scaled, N8)),
+            &[0x39] => (Mnemoic::Cmp, RegRm(scaled, scaled, false)),
             &[0x3b] => (Mnemoic::Cmp, RegRm(scaled, scaled, true)),
             &[0x85] => (Mnemoic::Test, RegRm(scaled, scaled, true)),
             &[0x0f, 0x9c] => (Mnemoic::Setl, Rm(N8)),
 
-            &[0x7f] =>(Mnemoic::Jg, Rel(N8)),
             &[0x74] =>(Mnemoic::Je, Rel(N8)),
+            &[0x7c] =>(Mnemoic::Jl, Rel(N8)),
             &[0x7e] =>(Mnemoic::Jle, Rel(N8)),
+            &[0x7f] =>(Mnemoic::Jg, Rel(N8)),
+            &[0x7d] =>(Mnemoic::Jge, Rel(N8)),
             &[0xeb] =>(Mnemoic::Jmp, Rel(N8)),
             &[0xe8] =>(Mnemoic::Call, Rel(N16)),
 
@@ -450,6 +454,7 @@ mod tests {
         test(&[0x0f, 0xbe, 0xc0], "movsx eax, al");
         test(&[0x80, 0x7d, 0xff, 0x60], "cmp byte ptr [rbp-0x1], 0x60");
         test(&[0x7e, 0x19], "jle +0x19");
+        test(&[0x39, 0x45, 0xfc], "cmp dword ptr [rbp-0x4], eax");
 
         test(&[0x55], "push rbp");
         test(&[0x48, 0x89, 0xe5], "mov rbp, rsp");

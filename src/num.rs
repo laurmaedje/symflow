@@ -38,11 +38,16 @@ macro_rules! flags {
 };
 }
 
+/// Make sure operations only happen on same integers.
+fn check_compatible(a: DataType, b: DataType, operation: &str) {
+    assert_eq!(a, b, "incompatible data types for integer {}", operation);
+}
+
 /// Arithmetic operation with flags.
 macro_rules! flagged {
 ($name:ident, $target:ident, $a:ident, $b:ident => $op:ident, $flags:expr) => {
     pub fn $name(self, other: Integer) -> (Integer, Flags) {
-        assert_eq!(self.0, other.0, "incompatible data types for integer operation");
+        check_compatible(self.0, other.0, "operation");
         typed!(cast => self.0, true, {
             let $a = cast(self.1);
             let $b = cast(other.1);
@@ -125,7 +130,7 @@ macro_rules! binary_operation {
         type Output = Integer;
 
         fn $func(self, other: Integer) -> Integer {
-            assert_eq!(self.0, other.0, "incompatible data types for integer operation");
+            check_compatible(self.0, other.0, "operation");
             Integer(self.0, typed!(cast => self.0, false, {
                 (cast(self.1).$op(cast(other.1))) as u64
             }))
@@ -142,7 +147,7 @@ binary_operation!(BitOr, bitor, bitor);
 
 impl Ord for Integer {
     fn cmp(&self, other: &Integer) -> Ordering {
-        assert_eq!(self.0, other.0, "incompatible data types for integer comparison");
+        check_compatible(self.0, other.0, "comparison");
         typed!(cast => self.0, false, {
             (cast(self.1).cmp(&cast(other.1)))
         })
@@ -158,7 +163,7 @@ impl PartialOrd for Integer {
 impl Eq for Integer {}
 impl PartialEq for Integer {
     fn eq(&self, other: &Integer) -> bool {
-        assert_eq!(self.0, other.0, "incompatible data types for integer comparison");
+        check_compatible(self.0, other.0, "comparison");
         self.1 == other.1
     }
 }

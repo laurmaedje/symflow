@@ -58,6 +58,8 @@ pub struct MicroEncoder {
     last_comparison: Option<Comparison>,
 }
 
+type EncoderResult<T> = Result<T, String>;
+
 impl MicroEncoder {
     /// Create a new encoder.
     pub fn new() -> MicroEncoder {
@@ -70,6 +72,12 @@ impl MicroEncoder {
 
     /// Encode an instruction into microcode.
     pub fn encode(&mut self, inst: &Instruction) -> EncodeResult<Microcode> {
+        self.encode_internal(inst)
+            .map_err(|msg| EncodingError::new(inst.clone(), msg))
+    }
+
+    /// The actual encoding but with a different result type that the public interface.
+    fn encode_internal(&mut self, inst: &Instruction) -> EncoderResult<Microcode> {
         use MicroOperation as Op;
         use Mnemoic::*;
 
@@ -95,15 +103,15 @@ impl MicroEncoder {
                 if dest.data_type() != src.data_type() {
                     self.ops.clear();
                     self.temps = 0;
-                    self.encode_move_casted(inst, true);
+                    self.encode_move_casted(inst, true)?;
                 } else {
                     self.encode_move(dest, src)?;
                 }
             },
 
             // Load the source, cast it to the destination type and move it there.
-            Movzx => self.encode_move_casted(inst, false),
-            Movsx => self.encode_move_casted(inst, true),
+            Movzx => self.encode_move_casted(inst, false)?,
+            Movsx => self.encode_move_casted(inst, true)?,
 
             // Retrieve both locations, but instead of loading just move the
             // address into the destination.
@@ -114,31 +122,33 @@ impl MicroEncoder {
                 if let Location::Indirect(_, _, temp) = src {
                     self.encode_move(dest, Location::Temp(temp))?;
                 } else {
-                    panic!("encode: invalid source for lea");
+                    return Err("invalid source operand for lea".to_string());
                 }
             },
 
             // Store or load data on the stack and adjust the stack pointer.
             Push => {
                 let src = self.encode_get_location(inst.operands[0]);
-                self.encode_push(src);
+                self.encode_push(src)?;
             },
             Pop => {
                 let dest = self.encode_get_location(inst.operands[0]);
-                self.encode_pop(dest);
+                self.encode_pop(dest)?;
             },
 
             // Jump to the first operand under specific conditions.
-            Jmp => self.encode_jump(inst.operands[0], Condition::True),
-            Je => self.encode_jump(inst.operands[0], Condition::Equal(self.get_comparison())),
-            Jg => self.encode_jump(inst.operands[0], Condition::Greater(self.get_comparison())),
-            Jle => self.encode_jump(inst.operands[0], Condition::LessEqual(self.get_comparison())),
+            Jmp => self.encode_jump(inst, Condition::True)?,
+            Je => self.encode_comp_jump(inst, Condition::Equal)?,
+            Jl => self.encode_comp_jump(inst, Condition::Less)?,
+            Jle => self.encode_comp_jump(inst, Condition::LessEqual)?,
+            Jg => self.encode_comp_jump(inst, Condition::Greater)?,
+            Jge => self.encode_comp_jump(inst, Condition::GreaterEqual)?,
 
             // Save the procedure linking information on the stack and jump.
             Call => {
                 let rip = self.encode_get_location(Operand::Direct(Register::RIP));
-                self.encode_push(rip);
-                self.encode_jump(inst.operands[0], Condition::True);
+                self.encode_push(rip)?;
+                self.encode_jump(inst, Condition::True)?;
             },
 
             // Copies the base pointer into the stack pointer register and pops the
@@ -146,15 +156,15 @@ impl MicroEncoder {
             Leave => {
                 let rbp = self.encode_get_location(Operand::Direct(Register::RBP));
                 let rsp = self.encode_get_location(Operand::Direct(Register::RSP));
-                self.encode_move(rsp, rbp).unwrap();
-                self.encode_pop(rbp);
+                self.encode_move(rsp, rbp)?;
+                self.encode_pop(rbp)?;
             },
 
             // Jumps back to the address located on top of the stack.
             Ret => {
                 let target = Temporary(DataType::N64, self.temps);
                 self.temps += 1;
-                self.encode_pop(Location::Temp(target));
+                self.encode_pop(Location::Temp(target))?;
                 self.ops.push(Op::Jump { target, condition: Condition::True, relative: false });
             },
 
@@ -166,7 +176,7 @@ impl MicroEncoder {
                 let ((_, left), (_, right)) = self.encode_load_both(inst);
                 self.last_comparison = Some(Comparison::And(left, right));
             }
-            Setl => self.encode_set(inst.operands[0], Condition::Less(self.get_comparison())),
+            Setl => self.encode_comp_set(inst, Condition::Less)?,
 
             Syscall => { self.ops.push(Op::Syscall); },
             Nop => {},
@@ -192,30 +202,43 @@ impl MicroEncoder {
         (left, right)
     }
 
-    /// Encode a relative jump.
-    fn encode_jump(&mut self, operand: Operand, condition: Condition) {
-        if let Operand::Offset(offset) = operand {
+    /// Encode a conditional, relative jump.
+    fn encode_jump(&mut self, inst: &Instruction, condition: Condition) -> EncoderResult<()> {
+        if let Operand::Offset(offset) = inst.operands[0] {
             let target = Temporary(DataType::N64, self.temps);
             let constant = Integer(DataType::N64, offset as u64);
             self.ops.push(MicroOperation::Const { dest: Location::Temp(target), constant });
             self.ops.push(MicroOperation::Jump { target, condition, relative: true });
             self.temps += 1;
+            Ok(())
         } else {
-            panic!("encode_jump: invalid operand for jump");
+            Err("invalid operand for jump".to_string())
         }
     }
 
+    /// Encode a jump from the last comparison.
+    fn encode_comp_jump<F>(&mut self, inst: &Instruction, comp: F) -> EncoderResult<()>
+    where F: FnOnce(Comparison) -> Condition {
+        self.encode_jump(inst, comp(self.get_comparison()?))
+    }
+
     /// Encode a set instruction, which sets a bit based on a condition.
-    fn encode_set(&mut self, operand: Operand, condition: Condition) {
-        let location = self.encode_get_location(operand);
+    fn encode_set(&mut self, inst: &Instruction, condition: Condition) -> EncoderResult<()> {
+        let location = self.encode_get_location(inst.operands[0]);
         let temp = Temporary(location.data_type(), self.temps);
         self.temps += 1;
         self.ops.push(MicroOperation::Set { target: temp, condition });
-        self.encode_move(location, Location::Temp(temp)).unwrap();
+        self.encode_move(location, Location::Temp(temp))
+    }
+
+    /// Encode a set from the last comparison.
+    fn encode_comp_set<F>(&mut self, inst: &Instruction, comp: F) -> EncoderResult<()>
+    where F: FnOnce(Comparison) -> Condition {
+        self.encode_set(inst, comp(self.get_comparison()?))
     }
 
     /// Enocde a push instruction.
-    fn encode_push(&mut self, src: Location) {
+    fn encode_push(&mut self, src: Location) -> EncoderResult<()> {
         // Load the stack pointer.
         let (sp, stack) = self.encode_load_operand(Operand::Direct(Register::RSP));
         let data_type = src.data_type();
@@ -230,21 +253,21 @@ impl MicroEncoder {
 
         // Move the value from the source onto the stack.
         let stack_space = Location::Indirect(data_type, 0, stack);
-        self.encode_move(stack_space, src).unwrap();
+        self.encode_move(stack_space, src)?;
 
         // Copy back the stack pointer.
-        self.encode_move(sp, Location::Temp(stack)).unwrap();
+        self.encode_move(sp, Location::Temp(stack))
     }
 
     /// Enocde a pop instruction.
-    fn encode_pop(&mut self, dest: Location) {
+    fn encode_pop(&mut self, dest: Location) -> EncoderResult<()> {
         // Load the stack pointer.
         let (sp, stack) = self.encode_load_operand(Operand::Direct(Register::RSP));
         let data_type = dest.data_type();
 
         // Move the value from the stack into the destination.
         let stack_space = Location::Indirect(data_type, 0, stack);
-        self.encode_move(dest, stack_space).unwrap();
+        self.encode_move(dest, stack_space)?;
 
         // Load the width of the moved thing as a constant and add it to the
         // stack pointer. Then copy the stack pointer back into it's register.
@@ -253,7 +276,7 @@ impl MicroEncoder {
         self.ops.push(MicroOperation::Const { dest: Location::Temp(offset), constant });
         self.ops.push(MicroOperation::Add { sum: stack, a: stack, b: offset });
         self.temps += 1;
-        self.encode_move(sp, Location::Temp(stack)).unwrap();
+        self.encode_move(sp, Location::Temp(stack))
     }
 
     /// Encode the operations to load both operands of a binary instruction and return
@@ -361,31 +384,31 @@ impl MicroEncoder {
     }
 
     /// Encode moving with a cast to the destination source type.
-    fn encode_move_casted(&mut self, inst: &Instruction, signed: bool) {
+    fn encode_move_casted(&mut self, inst: &Instruction, signed: bool) -> EncoderResult<()> {
         let dest = self.encode_get_location(inst.operands[0]);
         let (_, mut temp) = self.encode_load_operand(inst.operands[1]);
         let new = dest.data_type();
         self.ops.push(MicroOperation::Cast { target: temp, new, signed });
         temp.0 = new;
-        self.encode_move(dest, Location::Temp(temp)).unwrap();
+        self.encode_move(dest, Location::Temp(temp))
     }
 
     /// Encode a move operation.
-    fn encode_move(&mut self, dest: Location, src: Location) -> EncodeResult<()> {
+    fn encode_move(&mut self, dest: Location, src: Location) -> EncoderResult<()> {
         // Enforce that both operands have the exact same data type.
         if src.data_type() != dest.data_type() {
-            return Err(EncodingError::new(format!("incompatible data types for move: {} and {}",
-                src.data_type(), dest.data_type())));
+            return Err(format!("incompatible data types for move: {} and {}",
+                src.data_type(), dest.data_type()));
         }
 
         Ok(self.ops.push(MicroOperation::Mov { dest, src }))
     }
 
     /// Get the comparison which matches the last instruction modifying the flags.
-    fn get_comparison(&self) -> Comparison {
+    fn get_comparison(&self) -> EncoderResult<Comparison> {
         match self.last_comparison {
-            Some(cmp) => cmp,
-            _ => panic!("get_comparison: no previous comparison"),
+            Some(cmp) => Ok(cmp),
+            None => Err("get_comparison: no previous comparison".to_string()),
         }
     }
 }
@@ -478,9 +501,10 @@ impl Display for Temporary {
 pub enum Condition {
     True,
     Equal(Comparison),
-    Greater(Comparison),
     Less(Comparison),
     LessEqual(Comparison),
+    Greater(Comparison),
+    GreaterEqual(Comparison),
 }
 
 /// The comparison type for a condition.
@@ -497,9 +521,10 @@ impl Display for Condition {
         match self {
             Condition::True => write!(f, "true"),
             Condition::Equal(com) => write!(f, "{} equal", com),
-            Condition::Greater(com) => write!(f, "{} greater", com),
             Condition::Less(com) => write!(f, "{} less", com),
             Condition::LessEqual(com) => write!(f, "{} less/equal", com),
+            Condition::Greater(com) => write!(f, "{} greater", com),
+            Condition::GreaterEqual(com) => write!(f, "{} greater/equal", com),
         }
     }
 }
@@ -598,12 +623,12 @@ impl Display for Disassembly {
 
 /// The error type for microcode encoding.
 #[derive(Eq, PartialEq)]
-pub struct EncodingError(String);
+pub struct EncodingError(Instruction, String);
 
 impl EncodingError {
     /// Create a new encoding error with a message.
-    fn new<S: Into<String>>(message: S) -> EncodingError {
-        EncodingError(message.into())
+    fn new<S: Into<String>>(inst: Instruction, message: S) -> EncodingError {
+        EncodingError(inst, message.into())
     }
 }
 
@@ -613,7 +638,7 @@ impl std::error::Error for EncodingError {}
 
 impl Display for EncodingError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "failed to encode instruction: {}", self.0)
+        write!(f, "failed to encode instruction <{}>: {}", self.0, self.1)
     }
 }
 

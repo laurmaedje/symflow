@@ -1,5 +1,6 @@
 // compile with: gcc -nostdlib -o block block.c
 
+
 int compare(int a, int b) {
     return a < b;
 }

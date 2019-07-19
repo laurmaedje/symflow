@@ -2,10 +2,10 @@
 
 use std::collections::HashMap;
 use std::cell::RefCell;
-use std::fmt::{self, Debug, Display, Formatter};
+use std::fmt::{self, Display, Formatter};
 use crate::amd64::Register;
 use crate::ir::{MicroOperation, Location, Temporary, Condition, Comparison, MemoryMapped};
-use crate::num::{Integer, DataType};
+use crate::num::{Integer, DataType, DataType::*};
 use self::SymExpr::*;
 
 
@@ -52,7 +52,7 @@ impl SymState {
             Op::Jump { target, condition, relative } => {
                 return Some(Event::Jump {
                     target: self.get_temp(target),
-                    condition: self.evaluate(condition, DataType::N8),
+                    condition: self.evaluate(condition, N8),
                     relative
                 });
             },
@@ -79,8 +79,7 @@ impl SymState {
 
     /// Move a value from a location to another location.
     fn do_move(&mut self, dest: Location, src: Location) {
-        assert_eq!(dest.data_type(), src.data_type(),
-            "do_move: incompatible data types for move");
+        assert_eq!(dest.data_type(), src.data_type(), "do_move: incompatible data types for move");
         let value = self.read_location(src);
 
         self.write_location(dest, value);
@@ -91,17 +90,16 @@ impl SymState {
         match num {
             // Read from file descriptor.
             0 => {
-                let fd = self.get_reg(Register::RDI);
                 let buf = self.get_reg(Register::RSI);
                 let count = self.get_reg(Register::RDX);
                 let byte_count = match count {
-                    Int(Integer(DataType::N64, bytes)) => bytes,
+                    Int(Integer(N64, bytes)) => bytes,
                     _ => panic!("do_syscall: read: unknown byte count"),
                 };
 
                 for i in 0 .. byte_count {
-                    let target = buf.clone().add(Int(Integer(DataType::N64, i)));
-                    let value = Sym(self.memory[0].new_symbol(DataType::N8));
+                    let target = buf.clone().add(Int(Integer(N64, i)));
+                    let value = Sym(self.memory[0].new_symbol(N8));
                     self.memory[0].write_expr(target, value);
                 }
             },
@@ -124,9 +122,10 @@ impl SymState {
             True => Int(Integer(data_type, 1)),
 
             Equal(Cmp::Sub(a, b)) => self.get_temp(a).equal(self.get_temp(b), data_type),
-            Greater(Cmp::Sub(a, b)) => self.get_temp(a).greater(self.get_temp(b), data_type),
             Less(Cmp::Sub(a, b)) => self.get_temp(a).less(self.get_temp(b), data_type),
             LessEqual(Cmp::Sub(a, b)) => self.get_temp(a).less_equal(self.get_temp(b), data_type),
+            Greater(Cmp::Sub(a, b)) => self.get_temp(a).greater(self.get_temp(b), data_type),
+            GreaterEqual(Cmp::Sub(a, b)) => self.get_temp(a).greater_equal(self.get_temp(b), data_type),
 
             Equal(Cmp::And(a, b)) => self.get_temp(a).and(self.get_temp(b))
                 .equal(Int(Integer(a.0, 0)), data_type),
@@ -144,8 +143,7 @@ impl SymState {
             },
             Location::Indirect(data_type, space, temp) => {
                 let addr = self.get_temp(temp);
-                assert_eq!(addr.data_type(), DataType::N64,
-                    "read_location: address has to be 64-bit");
+                assert_eq!(addr.data_type(), N64, "read_location: address has to be 64-bit");
                 self.memory[space].read_expr(addr, data_type)
             }
         }
@@ -163,8 +161,7 @@ impl SymState {
             },
             Location::Indirect(_, space, temp) => {
                 let addr = self.get_temp(temp);
-                assert_eq!(addr.data_type(), DataType::N64,
-                    "write_location: address has to be 64-bit");
+                assert_eq!(addr.data_type(), N64, "write_location: address has to be 64-bit");
                 self.memory[space].write_expr(addr, value);
             }
         }
@@ -464,7 +461,7 @@ impl Display for Symbol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::num::{Integer, DataType::*};
+    use crate::num::Integer;
 
     #[test]
     fn expr() {

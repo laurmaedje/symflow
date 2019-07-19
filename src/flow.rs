@@ -76,7 +76,7 @@ impl FlowGraph {
                             stack.push((target, exit.state.clone()));
                         }
                     },
-                    _ => panic!("flow graph: unhandled jump target: {}", exit.target),
+                    _ => panic!("flow graph: unresolved jump target: {}", exit.target),
                 }
             }
 
@@ -180,20 +180,17 @@ mod tests {
     use super::*;
     use crate::elf::ElfFile;
 
-    fn gen(file: &str) {
+    fn test(file: &str) {
         println!("Generating flow graph for <{}>", file);
         let mut file = ElfFile::new(File::open(file).unwrap()).unwrap();
         let text = file.get_section(".text").unwrap();
         let graph = FlowGraph::new(text, file.header.entry);
-        // println!();
-        // println!("flow graph: {}", graph);
-        // println!();
         println!();
     }
 
     #[test]
     fn flow() {
-        gen("test/block-1");
-        gen("test/read");
+        test("test/block-1");
+        test("test/read");
     }
 }
