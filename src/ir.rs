@@ -237,7 +237,7 @@ impl MicroEncoder {
         self.encode_set(inst, comp(self.get_comparison()?))
     }
 
-    /// Enocde a push instruction.
+    /// Encode a push instruction.
     fn encode_push(&mut self, src: Location) -> EncoderResult<()> {
         // Load the stack pointer.
         let (sp, stack) = self.encode_load_operand(Operand::Direct(Register::RSP));
@@ -259,7 +259,7 @@ impl MicroEncoder {
         self.encode_move(sp, Location::Temp(stack))
     }
 
-    /// Enocde a pop instruction.
+    /// Encode a pop instruction.
     fn encode_pop(&mut self, dest: Location) -> EncoderResult<()> {
         // Load the stack pointer.
         let (sp, stack) = self.encode_load_operand(Operand::Direct(Register::RSP));
@@ -668,6 +668,7 @@ mod tests {
         disassemble_file("test/block-1");
         disassemble_file("test/block-2");
         disassemble_file("test/read");
+        disassemble_file("test/paths");
     }
 
     fn test(bytes: &[u8], display: &str) {

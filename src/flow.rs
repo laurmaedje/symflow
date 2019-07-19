@@ -12,164 +12,183 @@ use crate::num::{Integer, DataType};
 /// Control flow graph representation of a program.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FlowGraph {
-    pub blocks: HashMap<u64, (BasicBlock, FlowEdges)>,
+    pub blocks: HashMap<u64, Block>,
 }
 
 /// A single flat jump-free sequence of micro operations.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct BasicBlock {
+pub struct Block {
     pub addr: u64,
     pub len: u64,
     pub code: Microcode,
 }
 
-/// The incoming and outgoing edges of a basic block in the flow graph.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct FlowEdges {
-    pub incoming: Vec<(usize, Condition)>,
-    pub outgoing: Vec<(usize, Condition)>,
-}
-
 impl FlowGraph {
     /// Generate a flow graph from the `.text` section of a program.
-    pub fn new(text: Section, entry: u64) -> FlowGraph {
-        let base = text.header.addr;
-        let binary = &text.data;
-
-        let mut stack = vec![(entry, SymState::new())];
-        let mut visited = HashSet::new();
-        let mut blocks = HashMap::new();
-
-        while let Some((addr, state)) = stack.pop() {
-            // Parse the first block.
-            let start = addr - base;
-            let (block, exit) = parse_block(&binary[start as usize ..], addr, state.clone());
-            visited.insert(addr);
-
-            print!("[Block {:#x}]", block.addr);
-
-            // Add the possible exits to the stack.
-            if let Some(exit) = exit {
-                match exit.target {
-                    SymExpr::Int(Integer(DataType::N64, target)) => {
-                        let alt_target = addr + block.len;
-
-                        print!(" Condition: {}", exit.condition);
-
-                        // Determine which paths are reachable.
-                        let mut jmp = false;
-                        let mut alt = false;
-                        match exit.condition {
-                            SymExpr::Int(Integer(DataType::N8, 0)) => alt = true,
-                            SymExpr::Int(Integer(DataType::N8, 1)) => jmp = true,
-                            _ => {
-                                alt = true;
-                                jmp = true;
-                            },
-                        }
-
-                        if alt /* && !visited.contains(&alt_target) */ {
-                            stack.push((alt_target, exit.state.clone()));
-                        }
-
-                        if jmp /* && !visited.contains(&target) */ {
-                            stack.push((target, exit.state.clone()));
-                        }
-                    },
-                    _ => panic!("flow graph: unresolved jump target: {}", exit.target),
-                }
-            }
-
-            println!();
-
-            blocks.insert(block.addr, (block, FlowEdges {
-                incoming: vec![],
-                outgoing: vec![],
-            }));
-        }
-
-        FlowGraph { blocks }
+    pub fn new(text: &Section, entry: u64) -> FlowGraph {
+        FlowConstructor::new(text).construct(entry)
     }
 }
 
-/// Parse the basic block at the beginning of the given binary code.
-fn parse_block(binary: &[u8], entry: u64, mut state: SymState) -> (BasicBlock, Option<BlockExit>) {
-    // Symbolically execute the block and keep the microcode.
-    let mut code = Vec::new();
-    let mut encoder = MicroEncoder::new();
-    let mut addr = 0;
-
-    // Execute instructions until an exit is found.
-    loop {
-        // Parse the instruction.
-        let bytes = &binary[addr as usize ..];
-        let len = Instruction::length(bytes);
-        let instruction = Instruction::decode(bytes).unwrap();
-        addr += len;
-
-        // Encode the instruction in microcode.
-        let ops = encoder.encode(&instruction).unwrap().ops;
-        code.extend(&ops);
-
-        // Execute the microcode.
-        for &op in &ops {
-            if let Some(event) = state.step(entry + addr, op) {
-                let exit = match event {
-                    // If it is a jump, add the exit to the list.
-                    Event::Jump { target, condition, relative } => Some(BlockExit {
-                        target: if relative {
-                            target.clone().add(SymExpr::Int(Integer::from_ptr(entry + addr)))
-                        } else {
-                            target.clone()
-                        },
-                        condition,
-                        state,
-                    }),
-                    Event::Exit => None,
-                };
-
-                return (BasicBlock {
-                    addr: entry,
-                    len: addr,
-                    code: Microcode { ops: code },
-                }, exit);
-            }
-        }
-
-    }
+#[derive(Debug, Clone)]
+struct FlowConstructor<'a> {
+    bin: &'a [u8],
+    base: u64,
+    blocks: HashMap<u64, Block>,
+    stack: Vec<(u64, SymState, Vec<(u64, u64)>)>,
 }
 
 /// An exit of a block.
 #[derive(Debug, Clone)]
-struct BlockExit {
+struct Exit {
     target: SymExpr,
-    condition: SymExpr,
+    condition: Condition,
     state: SymState,
+}
+
+impl<'a> FlowConstructor<'a> {
+    /// Construct a new flow graph builder.
+    fn new(text: &'a Section) -> FlowConstructor<'a> {
+        FlowConstructor {
+            bin: &text.data,
+            base: text.header.addr,
+            blocks: HashMap::new(),
+            stack: Vec::new(),
+        }
+    }
+
+    /// Build the flow graph.
+    fn construct(mut self, entry: u64) -> FlowGraph {
+        self.stack.push((entry, SymState::new(), vec![]));
+
+        while let Some((addr, state, path)) = self.stack.pop() {
+            // Parse the first block.
+            println!("Parsing block {:#x}", addr);
+            let (block, maybe_exit) = self.parse_block(addr, state.clone());
+
+            // Add blocks reachable from this one.
+            if let Some(exit) = maybe_exit {
+                self.handle_exit(&block, exit, path);
+            }
+
+            // Add the block to the map if we have not already found it
+            // through another path.
+            if !self.blocks.contains_key(&block.addr) {
+                self.blocks.insert(block.addr, block);
+            }
+        }
+
+        FlowGraph { blocks: self.blocks }
+    }
+
+    /// Parse the basic block at the beginning of the given binary code.
+    fn parse_block(&self, entry: u64, mut state: SymState) -> (Block, Option<Exit>) {
+        let start = (entry - self.base) as usize;
+        let binary = &self.bin[start ..];
+
+        // Symbolically execute the block and keep the microcode.
+        let mut code = Vec::new();
+        let mut encoder = MicroEncoder::new();
+        let mut addr = 0;
+
+        // Execute instructions until an exit is found.
+        loop {
+            // Parse the instruction.
+            let bytes = &binary[addr as usize ..];
+            let len = Instruction::length(bytes);
+            let instruction = Instruction::decode(bytes).unwrap();
+            addr += len;
+
+            // Encode the instruction in microcode.
+            let ops = encoder.encode(&instruction).unwrap().ops;
+            code.extend(&ops);
+
+            // Execute the microcode.
+            for &op in &ops {
+                let maybe_event = state.step(entry + addr, op);
+
+                // Check for exiting.
+                if let Some(event) = maybe_event {
+                    let exit = match event {
+                        // If it is a jump, add the exit to the list.
+                        Event::Jump { target, condition, relative } => Some(Exit {
+                            target: if relative {
+                                target.clone().add(SymExpr::Int(Integer::from_ptr(entry + addr)))
+                            } else {
+                                target.clone()
+                            },
+                            condition,
+                            state,
+                        }),
+                        Event::Exit => None,
+                    };
+
+                    return (Block {
+                        addr: entry,
+                        len: addr,
+                        code: Microcode { ops: code },
+                    }, exit);
+                }
+            }
+
+        }
+    }
+
+    /// Add reachable blocks to the stack depending on the exit conditions of the
+    /// just parsed block.
+    fn handle_exit(&mut self, block: &Block, exit: Exit, path: Vec<(u64, u64)>) {
+        match exit.target {
+            SymExpr::Int(Integer(DataType::N64, target)) => {
+                if exit.condition != Condition::True {
+                    let alt_target = block.addr + block.len;
+                    self.add_if_acyclic(alt_target, block.addr, &path, &exit.state);
+                }
+
+                self.add_if_acyclic(target, block.addr, &path, &exit.state);
+            },
+
+            _ => panic!("handle_exit: unresolved jump target: {}", exit.target),
+        }
+    }
+
+    /// Add a target to the stack if it was not visitied already by this path
+    /// (e.g. if is not cyclic).
+    fn add_if_acyclic(&mut self, target: u64, current: u64, path: &[(u64, u64)], state: &SymState) {
+        if !path.contains(&(current, target)) {
+            println!("  Adding search target {:#x}", target);
+            let mut new_path = path.to_vec();
+            new_path.push((current, target));
+            self.stack.push((target, state.clone(), new_path));
+        }
+    }
 }
 
 impl Display for FlowGraph {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "FlowGraph [")?;
         if !self.blocks.is_empty() { writeln!(f)?; }
-        let mut blocks = self.blocks.values().map(|(b, _)| b).collect::<Vec<_>>();
+        let mut blocks = self.blocks.values().collect::<Vec<_>>();
         blocks.sort_by_key(|block| block.addr);
+        let mut first = true;
         for block in blocks {
+            if !first { writeln!(f)?; }
+            first = false;
             for line in block.to_string().lines() {
                 writeln!(f, "    {}", line)?;
             }
-            writeln!(f)?;
         }
         write!(f, "]")
     }
 }
 
-impl Display for BasicBlock {
+impl Display for Block {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        writeln!(f, "[Block: {:#x}]", self.addr)?;
+        write!(f, "Block: {:#x} [", self.addr)?;
+        if !self.code.ops.is_empty() { writeln!(f)?; }
         for op in &self.code.ops {
-            writeln!(f, "| {}", op)?;
+            writeln!(f, "   {}", op)?;
         }
-        Ok(())
+        writeln!(f, "]")
     }
 }
 
@@ -184,13 +203,17 @@ mod tests {
         println!("Generating flow graph for <{}>", file);
         let mut file = ElfFile::new(File::open(file).unwrap()).unwrap();
         let text = file.get_section(".text").unwrap();
-        let graph = FlowGraph::new(text, file.header.entry);
+        let graph = FlowGraph::new(&text, file.header.entry);
+        println!();
+        println!("flow graph: {}", graph);
         println!();
     }
 
     #[test]
     fn flow() {
         test("test/block-1");
+        test("test/block-2");
         test("test/read");
+        test("test/paths");
     }
 }

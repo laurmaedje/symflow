@@ -52,7 +52,7 @@ impl SymState {
             Op::Jump { target, condition, relative } => {
                 return Some(Event::Jump {
                     target: self.get_temp(target),
-                    condition: self.evaluate(condition, N8),
+                    condition,
                     relative
                 });
             },
@@ -81,14 +81,14 @@ impl SymState {
     fn do_move(&mut self, dest: Location, src: Location) {
         assert_eq!(dest.data_type(), src.data_type(), "do_move: incompatible data types for move");
         let value = self.read_location(src);
-
         self.write_location(dest, value);
     }
 
-    /// Emulate a linux syscall.
+    /// Emulate a Linux syscall.
     fn do_syscall(&mut self, num: u64) -> Option<Event> {
         match num {
-            // Read from file descriptor.
+            // Read from a file descriptor.
+            // We generate one symbol per byte read.
             0 => {
                 let buf = self.get_reg(Register::RSI);
                 let count = self.get_reg(Register::RDX);
@@ -104,7 +104,7 @@ impl SymState {
                 }
             },
 
-            // Write to file descriptor.
+            // Write to a file descriptor (has no effect, so we do nothing).
             1 => {},
 
             // System exit
@@ -194,7 +194,7 @@ impl SymState {
 /// Events occuring during symbolic execution.
 #[derive(Debug, Clone)]
 pub enum Event {
-    Jump { target: SymExpr, condition: SymExpr, relative: bool },
+    Jump { target: SymExpr, condition: Condition, relative: bool },
     Exit,
 }
 
