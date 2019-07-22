@@ -1,5 +1,11 @@
-all: block-1 block-2 read loop recurse merge
+target := ../target/
+names := block-1 block-2 case twice loop recursive recursive-2 func
+bins := $(addprefix $(target), $(names))
 
-%: %.c
-	gcc -nostdlib -o ../target/$@ $<
+all: $(bins)
+
+$(target)%: %.c
+	gcc -nostdlib -o $@ $<
 	objdump -M intel -d ../target/$@ > ../target/$@.asm
+
+.PHONY: all

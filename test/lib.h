@@ -1,3 +1,12 @@
+void main();
+
+void _start() {
+    main();
+    asm("mov $60,%rax; mov $0,%rdi; syscall");
+}
+
+#ifdef LIB_IO
+
 // Read one byte from stdin.
 char read_one_byte() {
     char x;
@@ -12,6 +21,7 @@ char read_one_byte() {
     return x;
 }
 
+// Read one byte to stdout.
 void write_one_byte(char x) {
     char* y = &x;
     asm("movq %0, %%rsi;"
@@ -23,17 +33,4 @@ void write_one_byte(char x) {
     );
 }
 
-void main() {
-    char x = read_one_byte();
-
-    if (x >= 'a' && x <= 'z') {
-        write_one_byte(x - 32);
-    } else {
-        write_one_byte(x);
-    }
-}
-
-void _start() {
-    main();
-    asm("mov $60,%rax; mov $0,%rdi; syscall");
-}
+#endif

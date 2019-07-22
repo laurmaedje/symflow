@@ -137,7 +137,7 @@ impl MicroEncoder {
             },
 
             // Jump to the first operand under specific conditions.
-            Jmp => self.encode_jump(inst, Condition::True)?,
+            Jmp => self.encode_jump(inst, Condition::True),
             Je => self.encode_comp_jump(inst, Condition::Equal)?,
             Jl => self.encode_comp_jump(inst, Condition::Less)?,
             Jle => self.encode_comp_jump(inst, Condition::LessEqual)?,
@@ -148,7 +148,7 @@ impl MicroEncoder {
             Call => {
                 let rip = self.encode_get_location(Operand::Direct(Register::RIP));
                 self.encode_push(rip)?;
-                self.encode_jump(inst, Condition::True)?;
+                self.encode_jump(inst, Condition::True);
             },
 
             // Copies the base pointer into the stack pointer register and pops the
@@ -203,23 +203,20 @@ impl MicroEncoder {
     }
 
     /// Encode a conditional, relative jump.
-    fn encode_jump(&mut self, inst: &Instruction, condition: Condition) -> EncoderResult<()> {
-        if let Operand::Offset(offset) = inst.operands[0] {
-            let target = Temporary(DataType::N64, self.temps);
-            let constant = Integer(DataType::N64, offset as u64);
-            self.ops.push(MicroOperation::Const { dest: Location::Temp(target), constant });
-            self.ops.push(MicroOperation::Jump { target, condition, relative: true });
-            self.temps += 1;
-            Ok(())
-        } else {
-            Err("invalid operand for jump".to_string())
-        }
+    fn encode_jump(&mut self, inst: &Instruction, condition: Condition) {
+        let operand = inst.operands[0];
+        let relative = match operand {
+            Operand::Offset(_) => true,
+            _ => false,
+        };
+        let (_, target) = self.encode_load_operand(operand);
+        self.ops.push(MicroOperation::Jump { target, condition, relative });
     }
 
     /// Encode a jump from the last comparison.
     fn encode_comp_jump<F>(&mut self, inst: &Instruction, comp: F) -> EncoderResult<()>
     where F: FnOnce(Comparison) -> Condition {
-        self.encode_jump(inst, comp(self.get_comparison()?))
+        Ok(self.encode_jump(inst, comp(self.get_comparison()?)))
     }
 
     /// Encode a set instruction, which sets a bit based on a condition.
@@ -688,17 +685,20 @@ mod tests {
 
     #[test]
     fn disassemble() {
-        disassemble_file("target/block-1");
-        disassemble_file("target/block-2");
-        disassemble_file("target/read");
-        disassemble_file("target/merge");
+        // disassemble_file("target/block-1");
+        // disassemble_file("target/block-2");
+        // disassemble_file("target/case");
+        // disassemble_file("target/twice");
+        // disassemble_file("target/loop");
+        // disassemble_file("target/recurse");
+        disassemble_file("target/func");
     }
 
     fn disassemble_file(filename: &str) {
         let mut file = ElfFile::new(File::open(filename).unwrap()).unwrap();
         let text = file.get_section(".text").unwrap();
         let disassembly = Disassembly::new(&text);
-        println!("{}: {}\n", filename, disassembly);
+        println!("{}: {:#}\n", filename, disassembly);
     }
 
     fn test(bytes: &[u8], display: &str) {
@@ -903,6 +903,17 @@ mod tests {
             mov [m1][0x20:n64] = T0:n64
             const T2:n64 = 0xffffffffffffff8a:n64
             jump by T2:n64
+        ");
+
+        // Instruction: call rdx
+        test(&[0xff, 0xd2], "
+            mov T0:n64 = [m1][0x20:n64]
+            const T1:n64 = 0x8:n64
+            sub T0:n64 = T0:n64 - T1:n64
+            mov [m0][(T0:n64):n64] = [m1][0x80:n64]
+            mov [m1][0x20:n64] = T0:n64
+            mov T2:n64 = [m1][0x10:n64]
+            jump to T2:n64
         ");
 
         // Instruction: leave

@@ -1,3 +1,5 @@
+#include "lib.h"
+
 int compare(int a, int b) {
     return a < b;
 }
@@ -11,8 +13,7 @@ void second(int* c) {
 }
 
 void main() {
-    int a = 3; // 3 for first, 7 for second
-    int b, c;
+    int a = 3, b, c;
 
     if (a < 5) {
         b = 15;
@@ -25,9 +26,4 @@ void main() {
     } else {
         second(&c);
     }
-}
-
-void _start() {
-    main();
-    asm("mov $60,%rax; mov $0,%rdi; syscall");
 }

@@ -1,3 +1,5 @@
+#include "lib.h"
+
 void helper() {}
 
 void func() {
@@ -8,9 +10,4 @@ void main() {
     while (1) {
         func();
     }
-}
-
-void _start() {
-    main();
-    asm("mov $60,%rax; mov $0,%rdi; syscall");
 }

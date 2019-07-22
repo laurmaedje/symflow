@@ -15,7 +15,7 @@ use crate::num::{Integer, DataType};
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FlowGraph {
     pub blocks: HashMap<BlockId, Block>,
-    pub flow: HashMap<(BlockId, BlockId), (Condition, bool)>,
+    pub edges: HashMap<(BlockId, BlockId), (Condition, bool)>,
 }
 
 /// A single flat jump-free sequence of micro operations.
@@ -31,8 +31,18 @@ pub struct Block {
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct BlockId {
     pub addr: u64,
-    pub jumpsite: u64,
-    pub trace: Vec<u64>,
+    /// The call trace in (callsite, target) pairs.
+    pub trace: Vec<(u64, u64)>,
+}
+
+impl BlockId {
+    /// Return the block id of this block without cycles in the trace.
+    fn decycled(&self) -> BlockId {
+        BlockId {
+            addr: self.addr,
+            trace: decycle(&self.trace, |a, b| a.1 == b.1)
+        }
+    }
 }
 
 impl FlowGraph {
@@ -60,7 +70,7 @@ impl FlowGraph {
         let mut blocks = self.blocks.values().collect::<Vec<_>>();
         blocks.sort_by_key(|block| &block.id);
         for block in blocks {
-            write!(f, "b{} [label=<<b>{:#x}:</b>{}", block.id, block.id.addr, BR)?;
+            write!(f, "b{} [label=<<b>{}:</b>{}", block.id, block.id, BR)?;
             if micro {
                 for op in &block.code.ops {
                     write!(f, "{}{}", op.to_string().replace("&", "&amp;"), BR)?;
@@ -72,14 +82,14 @@ impl FlowGraph {
             }
             write!(f, ">, shape=box")?;
 
-            if self.flow.keys().find(|edge| edge.0 == block.id).is_none() ||
-               self.flow.keys().find(|edge| edge.1 == block.id).is_none() {
+            if self.edges.keys().find(|edge| edge.0 == block.id).is_none() ||
+               self.edges.keys().find(|edge| edge.1 == block.id).is_none() {
                 write!(f, ", style=filled, fillcolor=\"#dddddd\"")?;
             }
             writeln!(f, "]")?;
         }
 
-        let mut edges = self.flow.iter().collect::<Vec<_>>();
+        let mut edges = self.edges.iter().collect::<Vec<_>>();
         edges.sort_by_key(|edge| edge.0);
         for ((start, end), &(condition, value)) in edges {
             write!(f, "b{} -> b{} [", start, end)?;
@@ -101,16 +111,16 @@ struct FlowConstructor<'a> {
     bin: &'a [u8],
     base: u64,
     blocks: HashMap<BlockId, Block>,
-    flow: HashMap<(BlockId, BlockId), (Condition, bool)>,
-    stack: Vec<(BlockId, SymState, Vec<(u64, Vec<u64>)>)>,
+    edges: HashMap<(BlockId, BlockId), (Condition, bool)>,
+    stack: Vec<(BlockId, Vec<BlockId>, SymState)>,
 }
 
 /// An exit of a block.
 #[derive(Debug, Clone)]
 struct Exit {
     target: SymExpr,
-    kind: ExitKind,
     jumpsite: u64,
+    kind: ExitKind,
     condition: Condition,
     state: SymState,
 }
@@ -130,7 +140,7 @@ impl<'a> FlowConstructor<'a> {
             bin: &text.data,
             base: text.header.addr,
             blocks: HashMap::new(),
-            flow: HashMap::new(),
+            edges: HashMap::new(),
             stack: Vec::new(),
         }
     }
@@ -139,18 +149,19 @@ impl<'a> FlowConstructor<'a> {
     fn construct(mut self, entry: u64) -> FlowGraph {
         self.stack.push((BlockId {
             addr: entry,
-            jumpsite: 0,
             trace: vec![],
-        }, SymState::new(), vec![]));
+        }, vec![], SymState::new()));
 
-        while let Some((id, state, path)) = self.stack.pop() {
+        while let Some((id, path, state)) = self.stack.pop() {
+            let decycled = id.decycled();
+
             // Parse the first block.
-            let (mut block, maybe_exit) = self.parse_block(&id, state.clone());
+            let (mut block, maybe_exit) = self.parse_block(decycled.clone(), state.clone());
             let len = block.len;
 
             // Add the block to the map if we have not already found it
             // through another path with the same call site and call trace.
-            self.blocks.entry(block.id.clone()).or_insert(block);
+            self.blocks.entry(decycled).or_insert(block);
 
             // Add blocks reachable from this one.
             if let Some(exit) = maybe_exit {
@@ -160,12 +171,12 @@ impl<'a> FlowConstructor<'a> {
 
         FlowGraph {
             blocks: self.blocks,
-            flow: self.flow,
+            edges: self.edges,
         }
     }
 
     /// Parse the basic block at the beginning of the given binary code.
-    fn parse_block(&self, id: &BlockId, mut state: SymState)
+    fn parse_block(&self, id: BlockId, mut state: SymState)
     -> (Block, Option<Exit>) {
         let start = (id.addr - self.base) as usize;
         let binary = &self.bin[start ..];
@@ -200,26 +211,28 @@ impl<'a> FlowConstructor<'a> {
                 if let Some(event) = maybe_event {
                     let exit = match event {
                         // If it is a jump, add the exit to the list.
-                        Event::Jump { target, condition, relative } => Some(Exit {
-                            target: if relative {
-                                target.clone().add(SymExpr::Int(Integer::from_ptr(next_addr)))
-                            } else {
-                                target.clone()
-                            },
-                            kind: match mnemoic {
-                                Mnemoic::Call => ExitKind::Call,
-                                Mnemoic::Ret => ExitKind::Return,
-                                _ => ExitKind::Jump,
-                            },
-                            jumpsite: current_addr,
-                            condition,
-                            state,
-                        }),
+                        Event::Jump { target, condition, relative } => {
+                            Some(Exit {
+                                target: if relative {
+                                    target.clone().add(SymExpr::Int(Integer::from_ptr(next_addr)))
+                                } else {
+                                    target.clone()
+                                },
+                                kind: match mnemoic {
+                                    Mnemoic::Call => ExitKind::Call,
+                                    Mnemoic::Ret => ExitKind::Return,
+                                    _ => ExitKind::Jump,
+                                },
+                                jumpsite: current_addr,
+                                condition,
+                                state,
+                            })
+                        },
                         Event::Exit => None,
                     };
 
                     return (Block {
-                        id: id.clone(),
+                        id,
                         len: index,
                         code: Microcode { ops: code },
                         instructions,
@@ -231,7 +244,9 @@ impl<'a> FlowConstructor<'a> {
 
     /// Add reachable blocks to the stack depending on the exit conditions of the
     /// just parsed block.
-    fn handle_exit(&mut self, mut id: BlockId, len: u64, exit: Exit, path: &[(u64, Vec<u64>)]) {
+    fn handle_exit(&mut self, mut id: BlockId, len: u64,
+        exit: Exit, path: &[BlockId]) {
+
         match exit.target {
             SymExpr::Int(Integer(DataType::N64, target)) => {
                 // Try the not-jumping path.
@@ -255,40 +270,68 @@ impl<'a> FlowConstructor<'a> {
 
     /// Add a target to the stack if it was not visitied already by this path
     /// (e.g. if is not cyclic).
-    fn add_if_acyclic(&mut self, addr: u64, jumpsite: u64, id: BlockId, kind: ExitKind,
-        condition: (Condition, bool), state: &SymState, path: &[(u64, Vec<u64>)]) {
+    fn add_if_acyclic(&mut self, addr: u64, jumpsite: u64, id: BlockId,
+        kind: ExitKind, condition: (Condition, bool), state: &SymState, path: &[BlockId]) {
 
-        // Adjust the trace.
-        let mut trace = id.trace.clone();
-        let recursive = id.trace.contains(&jumpsite);
-        if !recursive {
-            match kind {
-                ExitKind::Call => trace.push(jumpsite),
-                ExitKind::Return => { trace.pop(); },
-                ExitKind::Jump => {},
-            };
-        }
+        // Check if we are already recursing.
+        // We allow to recursive twice because we want to capture the returns
+        // of the recursing function to itself and the outside.
+        let fully_recursive = id.trace.iter()
+            .filter(|&&jump| jump == (jumpsite, addr)).count() >= 2;
 
-        // Assemble the new id.
-        let target_id = BlockId {
+        // Assemble the new ID.
+        let mut target_id = BlockId {
             addr,
-            jumpsite,
-            trace,
+            trace: id.trace.clone(),
         };
 
-        // Adjust the edges.
-        self.flow.insert((id.clone(), target_id.clone()), condition);
+        // Adjust the trace.
+        match kind {
+            ExitKind::Call => target_id.trace.push((jumpsite, addr)),
+            ExitKind::Return => { target_id.trace.pop(); },
+            _ => {},
+        }
 
-        // Only consider the target if it is acyclic.
-        if !path.contains(&(jumpsite, id.trace.clone())) && !recursive {
+        // Only consider the target if it is acyclic or recursing in the allowed limits.
+        let looping = path.contains(&target_id);
+
+        // println!("from id: {:x?}", id);
+        // println!("addr: {:x}", addr);
+        // println!("jumpsite: {:x}", jumpsite);
+        // println!("trace: {:x?}", id.trace);
+        // println!("path: {:x?}", path);
+        // println!("fully recursive: {}", fully_recursive);
+        // println!("looping: {}", looping);
+        // println!("=====================");
+
+        // Insert a new edge for the jump.
+        self.edges.insert((id.decycled(), target_id.decycled()), condition);
+
+        if !looping && !fully_recursive {
             // Add the current block to the path.
             let mut path = path.to_vec();
-            path.push((id.jumpsite, id.trace));
+            path.push(id);
 
             // Put the new target on top of the search stack.
-            self.stack.push((target_id, state.clone(), path));
+            self.stack.push((target_id, path, state.clone()));
         }
     }
+}
+
+fn decycle<T: Clone, F>(trace: &[T], cmp: F) -> Vec<T> where F: Fn(&T, &T) -> bool {
+    let mut out = Vec::new();
+
+    for item in trace {
+        if let Some(pos) = out.iter().position(|x| cmp(item, x)) {
+            for _ in 0 .. out.len() - pos - 1 {
+                out.pop();
+            }
+        } else {
+            out.push(item.clone());
+        }
+    }
+
+    out
 }
 
 impl Display for FlowGraph {
@@ -322,9 +365,9 @@ impl Display for Block {
 
 impl Display for BlockId {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{:#x}_{:x}_", self.addr, self.jumpsite)?;
-        for id in &self.trace {
-            write!(f, "_{:x}", id)?;
+        write!(f, "{:x}", self.addr)?;
+        for (from, to) in &self.trace {
+            write!(f, "_{:x}_{:x}", from, to)?;
         }
         Ok(())
     }
@@ -359,11 +402,30 @@ mod tests {
     }
 
     #[test]
-    fn flow() {
+    fn flow_graph() {
         test("target/block-1");
-        test("target/read");
-        test("target/merge");
+        test("target/case");
+        test("target/twice");
         test("target/loop");
-        test("target/recurse");
+        test("target/recursive");
+        test("target/recursive-2");
+        test("target/func");
+    }
+
+    fn test_decycle(left: Vec<&str>, right: Vec<&str>) {
+        assert_eq!(decycle(&left, |a, b| a == b), right);
+    }
+
+    #[test]
+    fn decycling() {
+        test_decycle(vec!["main", "fib", "fib"], vec!["main", "fib"]);
+        test_decycle(vec!["main", "fib", "fib", "a"], vec!["main", "fib", "a"]);
+        test_decycle(vec!["main", "foo", "a"], vec!["main", "foo", "a"]);
+        test_decycle(vec!["main", "foo", "bar", "a"], vec!["main", "foo", "bar", "a"]);
+        test_decycle(vec!["main", "foo", "bar", "foo"], vec!["main", "foo"]);
+        test_decycle(vec!["main", "foo", "bar", "foo", "a"], vec!["main", "foo", "a"]);
+        test_decycle(vec!["main", "foo", "bar", "foo", "bar", "a"],
+                     vec!["main", "foo", "bar", "a"]);
+        test_decycle(vec!["main", "foo", "bar", "bar", "foo", "a"], vec!["main", "foo", "a"]);
     }
 }

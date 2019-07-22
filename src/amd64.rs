@@ -91,16 +91,16 @@ impl<'a> Decoder<'a> {
 
         } else if let Rm(rm_w) = op {
             // Parse just the R/M part and add a direct operand with it.
-            let modrm_rm = self.decode_modrm().2;
-            operands.push(construct_modrm_rm(rex.b, modrm_rm, rm_w, None));
+            let (modus, _, rm) = self.decode_modrm();
+            operands.push(construct_modrm_rm(rex.b, modus, rm, rm_w, None));
 
         } else if let RegRm(reg_w, rm_w, ordered) = op {
             // Parse the ModR/M byte with displacement.
-            let (reg, rm, displace) = self.decode_modrm_displaced();
+            let (modus, reg, rm, displace) = self.decode_modrm_displaced();
 
             // Construct the operands.
             let p = construct_modrm_reg(rex.r, reg, reg_w);
-            let s = construct_modrm_rm(rex.b, rm, rm_w, displace);
+            let s = construct_modrm_rm(rex.b, modus, rm, rm_w, displace);
 
             // Insert them in the ordered denoted by the opcode.
             if ordered {
@@ -111,14 +111,22 @@ impl<'a> Decoder<'a> {
 
         } else if let RmIm(rm_w, im_w) = op {
             // Parse the ModR/M byte with displacement.
-            let (_, rm, displace) = self.decode_modrm_displaced();
+            let (modus, _, rm, displace) = self.decode_modrm_displaced();
 
             // Parse the immediate.
             let immediate = self.decode_immediate(im_w);
 
             // Construct and insert the operands.
-            operands.push(construct_modrm_rm(rex.b, rm, rm_w, displace));
+            operands.push(construct_modrm_rm(rex.b, modus, rm, rm_w, displace));
             operands.push(Operand::Immediate(im_w, immediate));
+
+        } else if let FixIm(left, im_w) = op {
+            // Parse the immediate.
+            let immediate = self.decode_immediate(im_w);
+
+            // The left operand is already given.
+            operands.push(left);
+            operands.push(Operand::Immediate(im_w, immediate))
 
         } else if let Rel(width) = op {
             // Parse the relative offset and adjust it by the length of this instruction.
@@ -196,6 +204,7 @@ impl<'a> Decoder<'a> {
 
             &[0x80] if ext == Some(7) => (Mnemoic::Cmp, RmIm(N8, N8)),
             &[0x83] if ext == Some(7) => (Mnemoic::Cmp, RmIm(scaled, N8)),
+            &[0x3c] => (Mnemoic::Cmp, FixIm(Operand::Direct(Register::AL), N8)),
             &[0x39] => (Mnemoic::Cmp, RegRm(scaled, scaled, false)),
             &[0x3b] => (Mnemoic::Cmp, RegRm(scaled, scaled, true)),
             &[0x85] => (Mnemoic::Test, RegRm(scaled, scaled, true)),
@@ -208,6 +217,7 @@ impl<'a> Decoder<'a> {
             &[0x7d] =>(Mnemoic::Jge, Rel(N8)),
             &[0xeb] =>(Mnemoic::Jmp, Rel(N8)),
             &[0xe8] =>(Mnemoic::Call, Rel(N16)),
+            &[0xff] if ext == Some(2) =>(Mnemoic::Call, Rm(N64)),
 
             &[0x90] => (Mnemoic::Nop, Free),
             &[0xc9] => (Mnemoic::Leave, Free),
@@ -219,10 +229,10 @@ impl<'a> Decoder<'a> {
     }
 
     /// Decodes the ModR/M byte and displacement.
-    fn decode_modrm_displaced(&mut self) -> (u8, u8, Option<i64>) {
+    fn decode_modrm_displaced(&mut self) -> (u8, u8, u8, Option<i64>) {
         let (modus, reg, rm) = self.decode_modrm();
-        let displacement = self.decode_displacement(modus);
-        (reg, rm, displacement)
+        let displacement = self.decode_displacement(rm, modus);
+        (modus, reg, rm, displacement)
     }
 
     /// Decodes the ModR/M byte and returns a (modus, reg, rm) triple.
@@ -236,13 +246,14 @@ impl<'a> Decoder<'a> {
     }
 
     /// Decodes the displacement if there is any.
-    fn decode_displacement(&mut self, modrm_modus: u8) -> Option<i64> {
-        let (displace, off) = match modrm_modus {
-            0b00 => (Some(0), 0),
-            0b01 => (Some((self.bytes[self.index] as i8) as i64), 1),
-            0b10 => (Some(LittleEndian::read_i32(&self.bytes[self.index ..]) as i64), 4),
-            0b11 => (None, 0),
-            _ => panic!("decode_displacement: invalid modrm_modus"),
+    fn decode_displacement(&mut self, rm: u8, modus: u8) -> Option<i64> {
+        let (displace, off) = match (rm, modus) {
+            (_, 0b00) if rm != 0b101 => (Some(0), 0),
+            (_, 0b01) => (Some((self.bytes[self.index] as i8) as i64), 1),
+            (_, 0b10) | (0b101, 0b00)
+                => (Some(LittleEndian::read_i32(&self.bytes[self.index ..]) as i64), 4),
+            (_, 0b11) => (None, 0),
+            _ => panic!("decode_displacement: invalid combination"),
         };
         self.index += off;
         displace
@@ -277,6 +288,27 @@ impl<'a> Decoder<'a> {
     }
 }
 
+/// Constructs an operand from the reg part of ModR/M.
+fn construct_modrm_reg(rex_r: bool, reg: u8, reg_w: DataType) -> Operand {
+    Operand::Direct(Register::from_bits(rex_r, reg, reg_w))
+}
+
+/// Constructs an operand from the rm part of ModR/M with a displacement.
+fn construct_modrm_rm(rex_b: bool, modus: u8, rm: u8, reg_w: DataType,
+    displace: Option<i64>) -> Operand {
+    match displace {
+        Some(0) => Operand::Indirect(reg_w, Register::from_bits(rex_b, rm, DataType::N64)),
+        Some(offset) => {
+            let reg = match (modus, rm) {
+                (0b00, 0b101) => Register::RIP,
+                _ => Register::from_bits(rex_b, rm, DataType::N64),
+            };
+            Operand::IndirectDisplaced(reg_w, reg, offset)
+        },
+        None => Operand::Direct(Register::from_bits(rex_b, rm, reg_w)),
+    }
+}
+
 /// A REX prefix.
 #[derive(Debug, Copy, Clone)]
 struct RexPrefix {
@@ -295,23 +327,8 @@ enum OperandLayout {
     Rm(DataType),
     RegRm(DataType, DataType, bool),
     RmIm(DataType, DataType),
+    FixIm(Operand, DataType),
     Rel(DataType),
-}
-
-/// Constructs an operand from the reg part of ModR/M.
-fn construct_modrm_reg(rex_r: bool, reg: u8, reg_w: DataType) -> Operand {
-    Operand::Direct(Register::from_bits(rex_r, reg, reg_w))
-}
-
-/// Constructs an operand from the rm part of ModR/M with a displacement.
-fn construct_modrm_rm(rex_b: bool, rm: u8, reg_w: DataType, displace: Option<i64>) -> Operand {
-    let direct = Register::from_bits(rex_b, rm, reg_w);
-    let indirect = Register::from_bits(rex_b, rm, DataType::N64);
-    match displace {
-        Some(0) => Operand::Indirect(reg_w, indirect),
-        Some(offset) => Operand::IndirectDisplaced(reg_w, indirect, offset),
-        None => Operand::Direct(direct),
-    }
 }
 
 impl Display for Instruction {
@@ -502,6 +519,9 @@ mod tests {
         test(&[0x80, 0x7d, 0xff, 0x60], "cmp byte ptr [rbp-0x1], 0x60");
         test(&[0x7e, 0x19], "jle +0x19");
         test(&[0x39, 0x45, 0xfc], "cmp dword ptr [rbp-0x4], eax");
+        test(&[0x3c, 0x40], "cmp al, 0x40");
+        test(&[0xff, 0xd2], "call rdx");
+        test(&[0x48, 0x8d, 0x05, 0xcb, 0xff, 0xff, 0xff], "lea rax, qword ptr [rip-0x35]");
 
         assert_eq!(Instruction::decode(&[0x12, 0x34]).unwrap_err().0, vec![0x12, 0x34]);
     }
