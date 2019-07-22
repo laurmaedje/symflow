@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::fmt::{self, Display, Formatter};
 
 use crate::elf::Section;
-use crate::amd64::Instruction;
+use crate::amd64::{Instruction, Mnemoic};
 use crate::ir::{Microcode, MicroEncoder, Condition};
 use crate::sym::{SymState, SymExpr, Event};
 use crate::num::{Integer, DataType};
@@ -25,15 +25,14 @@ pub struct Block {
     pub len: u64,
     pub code: Microcode,
     pub instructions: Vec<Instruction>,
-    pub outgoing: HashSet<BlockId>,
-    pub incoming: HashSet<BlockId>,
 }
 
 /// A block identifier denoted by address and call site.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct BlockId {
     pub addr: u64,
-    pub callsite: u64,
+    pub jumpsite: u64,
+    pub trace: Vec<u64>,
 }
 
 impl FlowGraph {
@@ -58,8 +57,10 @@ impl FlowGraph {
         writeln!(f, "node [fontname=\"Source Code Pro\"]")?;
         writeln!(f, "edge [fontname=\"Source Code Pro\"]")?;
 
-        for block in self.blocks.values() {
-            write!(f, "b{id} [label=<<b>{id}:</b>{}", BR, id=block.id)?;
+        let mut blocks = self.blocks.values().collect::<Vec<_>>();
+        blocks.sort_by_key(|block| &block.id);
+        for block in blocks {
+            write!(f, "b{} [label=<<b>{:#x}:</b>{}", block.id, block.id.addr, BR)?;
             if micro {
                 for op in &block.code.ops {
                     write!(f, "{}{}", op.to_string().replace("&", "&amp;"), BR)?;
@@ -70,13 +71,17 @@ impl FlowGraph {
                 }
             }
             write!(f, ">, shape=box")?;
-            if block.incoming.is_empty() || block.outgoing.is_empty() {
+
+            if self.flow.keys().find(|edge| edge.0 == block.id).is_none() ||
+               self.flow.keys().find(|edge| edge.1 == block.id).is_none() {
                 write!(f, ", style=filled, fillcolor=\"#dddddd\"")?;
             }
             writeln!(f, "]")?;
         }
 
-        for (&(start, end), &(condition, value)) in self.flow.iter() {
+        let mut edges = self.flow.iter().collect::<Vec<_>>();
+        edges.sort_by_key(|edge| edge.0);
+        for ((start, end), &(condition, value)) in edges {
             write!(f, "b{} -> b{} [", start, end)?;
             if condition != Condition::True {
                 write!(f, "label=\"[{}]\", ", condition.pretty_format(value))?;
@@ -97,16 +102,25 @@ struct FlowConstructor<'a> {
     base: u64,
     blocks: HashMap<BlockId, Block>,
     flow: HashMap<(BlockId, BlockId), (Condition, bool)>,
-    stack: Vec<(u64, u64, SymState, Vec<(BlockId, BlockId)>)>,
+    stack: Vec<(BlockId, SymState, Vec<(u64, Vec<u64>)>)>,
 }
 
 /// An exit of a block.
 #[derive(Debug, Clone)]
 struct Exit {
     target: SymExpr,
-    callsite: u64,
+    kind: ExitKind,
+    jumpsite: u64,
     condition: Condition,
     state: SymState,
+}
+
+/// How the block is exited.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+enum ExitKind {
+    Call,
+    Return,
+    Jump,
 }
 
 impl<'a> FlowConstructor<'a> {
@@ -123,22 +137,20 @@ impl<'a> FlowConstructor<'a> {
 
     /// Build the flow graph.
     fn construct(mut self, entry: u64) -> FlowGraph {
-        self.stack.push((entry, 0, SymState::new(), vec![]));
+        self.stack.push((BlockId {
+            addr: entry,
+            jumpsite: 0,
+            trace: vec![],
+        }, SymState::new(), vec![]));
 
-        while let Some((addr, callsite, state, path)) = self.stack.pop() {
+        while let Some((id, state, path)) = self.stack.pop() {
             // Parse the first block.
-            let (mut block, maybe_exit) = self.parse_block(addr, callsite, state.clone());
-            let id = block.id;
+            let (mut block, maybe_exit) = self.parse_block(&id, state.clone());
             let len = block.len;
 
             // Add the block to the map if we have not already found it
-            // through another path with the same call site.
-            {
-                let block_ref = self.blocks.entry(block.id).or_insert(block);
-                if let Some((from, _)) = path.last() {
-                    block_ref.incoming.insert(*from);
-                }
-            }
+            // through another path with the same call site and call trace.
+            self.blocks.entry(block.id.clone()).or_insert(block);
 
             // Add blocks reachable from this one.
             if let Some(exit) = maybe_exit {
@@ -153,8 +165,9 @@ impl<'a> FlowConstructor<'a> {
     }
 
     /// Parse the basic block at the beginning of the given binary code.
-    fn parse_block(&self, addr: u64, callsite: u64, mut state: SymState) -> (Block, Option<Exit>) {
-        let start = (addr - self.base) as usize;
+    fn parse_block(&self, id: &BlockId, mut state: SymState)
+    -> (Block, Option<Exit>) {
+        let start = (id.addr - self.base) as usize;
         let binary = &self.bin[start ..];
 
         // Symbolically execute the block and keep the microcode.
@@ -169,7 +182,8 @@ impl<'a> FlowConstructor<'a> {
             let bytes = &binary[index as usize ..];
             let len = Instruction::length(bytes);
             let instruction = Instruction::decode(bytes).unwrap();
-            let current_addr = addr + index;
+            let mnemoic = instruction.mnemoic;
+            let current_addr = id.addr + index;
             index += len;
 
             // Encode the instruction in microcode.
@@ -179,7 +193,7 @@ impl<'a> FlowConstructor<'a> {
 
             // Execute the microcode.
             for &op in &ops {
-                let next_addr = addr + index;
+                let next_addr = id.addr + index;
                 let maybe_event = state.step(next_addr, op);
 
                 // Check for exiting.
@@ -192,7 +206,12 @@ impl<'a> FlowConstructor<'a> {
                             } else {
                                 target.clone()
                             },
-                            callsite: current_addr,
+                            kind: match mnemoic {
+                                Mnemoic::Call => ExitKind::Call,
+                                Mnemoic::Ret => ExitKind::Return,
+                                _ => ExitKind::Jump,
+                            },
+                            jumpsite: current_addr,
                             condition,
                             state,
                         }),
@@ -200,36 +219,34 @@ impl<'a> FlowConstructor<'a> {
                     };
 
                     return (Block {
-                        id: BlockId {
-                            addr,
-                            callsite,
-                        },
+                        id: id.clone(),
                         len: index,
                         code: Microcode { ops: code },
                         instructions,
-                        // These are filled in later.
-                        outgoing: HashSet::new(),
-                        incoming: HashSet::new(),
                     }, exit);
                 }
             }
-
         }
     }
 
     /// Add reachable blocks to the stack depending on the exit conditions of the
     /// just parsed block.
-    fn handle_exit(&mut self, id: BlockId, len: u64, exit: Exit, path: &[(BlockId, BlockId)]) {
+    fn handle_exit(&mut self, mut id: BlockId, len: u64, exit: Exit, path: &[(u64, Vec<u64>)]) {
         match exit.target {
             SymExpr::Int(Integer(DataType::N64, target)) => {
+                // Try the not-jumping path.
                 if exit.condition != Condition::True {
-                    let alt_target = id.addr + len;
-                    self.add_if_acyclic(alt_target, exit.callsite, id, path,
-                        (exit.condition, false), &exit.state);
+                    self.add_if_acyclic(
+                        id.addr + len, exit.jumpsite, id.clone(), exit.kind,
+                        (exit.condition, false), &exit.state, path
+                    );
                 }
 
-                self.add_if_acyclic(target, exit.callsite, id, path,
-                    (exit.condition, true), &exit.state);
+                // Try the jumping path.
+                self.add_if_acyclic(
+                    target, exit.jumpsite, id, exit.kind,
+                    (exit.condition, true), &exit.state, path
+                );
             },
 
             _ => panic!("handle_exit: unresolved jump target: {}", exit.target),
@@ -238,25 +255,38 @@ impl<'a> FlowConstructor<'a> {
 
     /// Add a target to the stack if it was not visitied already by this path
     /// (e.g. if is not cyclic).
-    fn add_if_acyclic(&mut self, addr: u64, callsite: u64, id: BlockId, path: &[(BlockId, BlockId)],
-        condition: (Condition, bool), state: &SymState) {
-        // Prepare the block id's.
-        let target_id = BlockId { addr, callsite };
-        let pair = (id, target_id);
+    fn add_if_acyclic(&mut self, addr: u64, jumpsite: u64, id: BlockId, kind: ExitKind,
+        condition: (Condition, bool), state: &SymState, path: &[(u64, Vec<u64>)]) {
 
-        if !path.contains(&pair) {
-            // Adjust the edges.
-            self.blocks.entry(id).and_modify(|block| {
-                block.outgoing.insert(target_id);
-            });
-            self.flow.insert(pair, condition);
+        // Adjust the trace.
+        let mut trace = id.trace.clone();
+        let recursive = id.trace.contains(&jumpsite);
+        if !recursive {
+            match kind {
+                ExitKind::Call => trace.push(jumpsite),
+                ExitKind::Return => { trace.pop(); },
+                ExitKind::Jump => {},
+            };
+        }
 
-            // Clone the path and add the new entry.
-            let mut new_path = path.to_vec();
-            new_path.push(pair);
+        // Assemble the new id.
+        let target_id = BlockId {
+            addr,
+            jumpsite,
+            trace,
+        };
+
+        // Adjust the edges.
+        self.flow.insert((id.clone(), target_id.clone()), condition);
+
+        // Only consider the target if it is acyclic.
+        if !path.contains(&(jumpsite, id.trace.clone())) && !recursive {
+            // Add the current block to the path.
+            let mut path = path.to_vec();
+            path.push((id.jumpsite, id.trace));
 
             // Put the new target on top of the search stack.
-            self.stack.push((addr, callsite, state.clone(), new_path));
+            self.stack.push((target_id, state.clone(), path));
         }
     }
 }
@@ -266,7 +296,7 @@ impl Display for FlowGraph {
         write!(f, "FlowGraph [")?;
         if !self.blocks.is_empty() { writeln!(f)?; }
         let mut blocks = self.blocks.values().collect::<Vec<_>>();
-        blocks.sort_by_key(|block| block.id);
+        blocks.sort_by_key(|block| &block.id);
         let mut first = true;
         for block in blocks {
             if !first { writeln!(f)?; }
@@ -281,14 +311,7 @@ impl Display for FlowGraph {
 
 impl Display for Block {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Block {} > {{", self.id)?;
-        let mut first = true;
-        for id in &self.outgoing {
-            if !first { write!(f, ", ")?; }
-            first = false;
-            write!(f, "{}", id)?;
-        }
-        write!(f, "}}: [")?;
+        write!(f, "Block {}", self.id)?;
         if !self.code.ops.is_empty() { writeln!(f)?; }
         for inst in &self.instructions {
             writeln!(f, "   {}", inst)?;
@@ -299,11 +322,11 @@ impl Display for Block {
 
 impl Display for BlockId {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        if self.callsite == 0 {
-            write!(f, "{:#x}", self.addr)
-        } else {
-            write!(f, "{:#x}_{:#x}", self.addr, self.callsite)
+        write!(f, "{:#x}_{:x}_", self.addr, self.jumpsite)?;
+        for id in &self.trace {
+            write!(f, "_{:x}", id)?;
         }
+        Ok(())
     }
 }
 
@@ -339,6 +362,8 @@ mod tests {
     fn flow() {
         test("target/block-1");
         test("target/read");
-        test("target/paths");
+        test("target/merge");
+        test("target/loop");
+        test("target/recurse");
     }
 }

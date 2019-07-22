@@ -635,12 +635,14 @@ impl Display for Disassembly {
         if !self.instructions.is_empty() { writeln!(f)?; }
         let mut start = true;
         for (addr, instruction, microcode) in &self.instructions {
-            if !start { writeln!(f)?; }
+            if f.alternate() && !start { writeln!(f)?; }
             start = false;
             writeln!(f, "    {:x}: {}", addr, instruction)?;
-            for line in microcode.to_string().lines() {
-                if !line.starts_with("Microcode") && line != "]" {
-                    writeln!(f, "         | {}", &line[4..])?;
+            if f.alternate() {
+                for line in microcode.to_string().lines() {
+                    if !line.starts_with("Microcode") && line != "]" {
+                        writeln!(f, "         | {}", &line[4..])?;
+                    }
                 }
             }
         }
@@ -689,7 +691,7 @@ mod tests {
         disassemble_file("target/block-1");
         disassemble_file("target/block-2");
         disassemble_file("target/read");
-        disassemble_file("target/paths");
+        disassemble_file("target/merge");
     }
 
     fn disassemble_file(filename: &str) {
