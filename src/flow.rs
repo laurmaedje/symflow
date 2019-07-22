@@ -24,7 +24,7 @@ pub struct Block {
     pub id: BlockId,
     pub len: u64,
     pub code: Microcode,
-    pub instructions: Vec<Instruction>,
+    pub instructions: Vec<(u64, Instruction)>,
 }
 
 /// A block identifier denoted by address and call site.
@@ -70,14 +70,24 @@ impl FlowGraph {
         let mut blocks = self.blocks.values().collect::<Vec<_>>();
         blocks.sort_by_key(|block| &block.id);
         for block in blocks {
-            write!(f, "b{} [label=<<b>{}:</b>{}", block.id, block.id, BR)?;
+            write!(f, "b{} [label=<<b>{:x}", block.id, block.id.addr)?;
+            if !block.id.trace.is_empty() {
+                write!(f, " by ")?;
+                let mut first = true;
+                for (callsite, _) in &block.id.trace {
+                    if !first { write!(f, " -&gt; ")?; } first = false;
+                    write!(f, "{:x}", callsite);
+                }
+            }
+            write!(f, "</b>{}", BR)?;
+
             if micro {
                 for op in &block.code.ops {
                     write!(f, "{}{}", op.to_string().replace("&", "&amp;"), BR)?;
                 }
             } else {
-                for instruction in &block.instructions {
-                    write!(f, "{}{}", instruction, BR)?;
+                for (addr, instruction) in &block.instructions {
+                    write!(f, "{:x}: {}{}", addr, instruction, BR)?;
                 }
             }
             write!(f, ">, shape=box")?;
@@ -99,10 +109,7 @@ impl FlowGraph {
             writeln!(f, "style=dashed, color=grey]")?;
         }
 
-        writeln!(f, "}}")?;
-
-
-        Ok(())
+        writeln!(f, "}}")
     }
 }
 
@@ -199,7 +206,7 @@ impl<'a> FlowConstructor<'a> {
 
             // Encode the instruction in microcode.
             let ops = encoder.encode(&instruction).unwrap().ops;
-            instructions.push(instruction);
+            instructions.push((current_addr, instruction));
             code.extend(&ops);
 
             // Execute the microcode.
@@ -295,15 +302,6 @@ impl<'a> FlowConstructor<'a> {
         // Only consider the target if it is acyclic or recursing in the allowed limits.
         let looping = path.contains(&target_id);
 
-        // println!("from id: {:x?}", id);
-        // println!("addr: {:x}", addr);
-        // println!("jumpsite: {:x}", jumpsite);
-        // println!("trace: {:x?}", id.trace);
-        // println!("path: {:x?}", path);
-        // println!("fully recursive: {}", fully_recursive);
-        // println!("looping: {}", looping);
-        // println!("=====================");
-
         // Insert a new edge for the jump.
         self.edges.insert((id.decycled(), target_id.decycled()), condition);
 
@@ -318,6 +316,7 @@ impl<'a> FlowConstructor<'a> {
     }
 }
 
+/// Remove all call cycles from the call trace.
 fn decycle<T: Clone, F>(trace: &[T], cmp: F) -> Vec<T> where F: Fn(&T, &T) -> bool {
     let mut out = Vec::new();
 
@@ -342,8 +341,7 @@ impl Display for FlowGraph {
         blocks.sort_by_key(|block| &block.id);
         let mut first = true;
         for block in blocks {
-            if !first { writeln!(f)?; }
-            first = false;
+            if !first { writeln!(f)?; } first = false;
             for line in block.to_string().lines() {
                 writeln!(f, "    {}", line)?;
             }
@@ -356,8 +354,8 @@ impl Display for Block {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "Block {}", self.id)?;
         if !self.code.ops.is_empty() { writeln!(f)?; }
-        for inst in &self.instructions {
-            writeln!(f, "   {}", inst)?;
+        for (addr, inst) in &self.instructions {
+            writeln!(f, "   {:x}: {}", addr, inst)?;
         }
         writeln!(f, "]")
     }
@@ -391,9 +389,11 @@ mod tests {
         let flow_temp = "target/temp-flow.gv";
         let mut flow_file = File::create(flow_temp).unwrap();
         graph.visualize(filename, flow_file, false);
-        let output = Command::new("bash")
-            .arg("-c")
-            .arg(format!("dot -Tpdf {} -o {}-flow.pdf", flow_temp, filename))
+        let output = Command::new("dot")
+            .arg("-Tpdf")
+            .arg(flow_temp)
+            .arg("-o")
+            .arg(format!("{}-flow.pdf", filename))
             .output()
             .expect("failed to run graphviz");
         io::stdout().write_all(&output.stdout).unwrap();
@@ -407,7 +407,7 @@ mod tests {
         test("target/case");
         test("target/twice");
         test("target/loop");
-        test("target/recursive");
+        test("target/recursive-1");
         test("target/recursive-2");
         test("target/func");
     }

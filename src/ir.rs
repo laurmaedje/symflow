@@ -685,12 +685,13 @@ mod tests {
 
     #[test]
     fn disassemble() {
-        // disassemble_file("target/block-1");
-        // disassemble_file("target/block-2");
-        // disassemble_file("target/case");
-        // disassemble_file("target/twice");
-        // disassemble_file("target/loop");
-        // disassemble_file("target/recurse");
+        disassemble_file("target/block-1");
+        disassemble_file("target/block-2");
+        disassemble_file("target/case");
+        disassemble_file("target/twice");
+        disassemble_file("target/loop");
+        disassemble_file("target/recursive-1");
+        disassemble_file("target/recursive-2");
         disassemble_file("target/func");
     }
 
@@ -698,7 +699,7 @@ mod tests {
         let mut file = ElfFile::new(File::open(filename).unwrap()).unwrap();
         let text = file.get_section(".text").unwrap();
         let disassembly = Disassembly::new(&text);
-        println!("{}: {:#}\n", filename, disassembly);
+        println!("{}: {}\n", filename, disassembly);
     }
 
     fn test(bytes: &[u8], display: &str) {
