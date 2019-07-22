@@ -1,7 +1,6 @@
 //! Microcode encoding of instructions.
 
 use std::fmt::{self, Debug, Display, Formatter};
-use crate::elf::Section;
 use crate::amd64::{Instruction, Mnemoic, Operand, Register};
 use crate::num::{DataType, Integer};
 
@@ -597,56 +596,6 @@ impl MemoryMapped for Register {
     }
 }
 
-/// A microcode representation of a whole program.
-#[derive(Debug, Clone)]
-pub struct Disassembly {
-    pub instructions: Vec<(u64, Instruction, Microcode)>,
-}
-
-impl Disassembly {
-    /// Create a new program from an ELF file.
-    pub fn new(text: &Section) -> Disassembly {
-        let base = text.header.addr;
-        let code = &text.data;
-
-        let mut instructions = Vec::new();
-        let mut index = 0;
-
-        let mut encoder = MicroEncoder::new();
-        while index < code.len() as u64 {
-            let len = Instruction::length(&code[index as usize ..]);
-            let bytes = &code[index as usize .. (index + len) as usize];
-            let instruction = Instruction::decode(bytes).unwrap();
-            let microcode = encoder.encode(&instruction).unwrap();
-            instructions.push((base + index, instruction, microcode));
-            index += len;
-        }
-
-        Disassembly { instructions }
-    }
-}
-
-impl Display for Disassembly {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Disassembly [")?;
-        if !self.instructions.is_empty() { writeln!(f)?; }
-        let mut start = true;
-        for (addr, instruction, microcode) in &self.instructions {
-            if f.alternate() && !start { writeln!(f)?; }
-            start = false;
-            writeln!(f, "    {:x}: {}", addr, instruction)?;
-            if f.alternate() {
-                for line in microcode.to_string().lines() {
-                    if !line.starts_with("Microcode") && line != "]" {
-                        writeln!(f, "         | {}", &line[4..])?;
-                    }
-                }
-            }
-        }
-        write!(f, "]")
-    }
-}
-
 
 /// The error type for microcode encoding.
 #[derive(Eq, PartialEq)]
@@ -678,29 +627,8 @@ impl Debug for EncodingError {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
-    use crate::elf::ElfFile;
     use crate::amd64::*;
     use super::*;
-
-    #[test]
-    fn disassemble() {
-        disassemble_file("target/block-1");
-        disassemble_file("target/block-2");
-        disassemble_file("target/case");
-        disassemble_file("target/twice");
-        disassemble_file("target/loop");
-        disassemble_file("target/recursive-1");
-        disassemble_file("target/recursive-2");
-        disassemble_file("target/func");
-    }
-
-    fn disassemble_file(filename: &str) {
-        let mut file = ElfFile::new(File::open(filename).unwrap()).unwrap();
-        let text = file.get_section(".text").unwrap();
-        let disassembly = Disassembly::new(&text);
-        println!("{}: {}\n", filename, disassembly);
-    }
 
     fn test(bytes: &[u8], display: &str) {
         test_with_encoder(&mut MicroEncoder::new(), bytes, display);

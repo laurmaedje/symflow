@@ -336,8 +336,7 @@ impl Display for Instruction {
         write!(f, "{}", self.mnemoic)?;
         let mut first = true;
         for operand in &self.operands {
-            if !first { write!(f, ",")?; }
-            first = false;
+            if !first { write!(f, ",")?; } first = false;
             write!(f, " {}", operand)?;
         }
         Ok(())
