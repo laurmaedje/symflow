@@ -83,7 +83,10 @@ impl FlowGraph {
     }
 
     /// Visualize this flow graph in a graphviz DOT file.
-    pub fn visualize<W: Write>(&self, title: &str, target: W, style: VisualStyle) -> io::Result<()> {
+    pub fn visualize<W: Write>(
+        &self, target: W, program: &Program,
+        title: &str, style: VisualStyle
+    ) -> io::Result<()> {
         const BR: &str = "<br align=\"left\"/>";
         let mut f = target;
 
@@ -98,6 +101,9 @@ impl FlowGraph {
         for (index, node) in self.nodes.iter().enumerate() {
             // Format the header of the block box.
             write!(f, "b{} [label=<<b>{:x}", index, node.ctx.addr)?;
+            if let Some(name) = program.symbols.get(&node.ctx.addr) {
+                write!(f, " &lt;{}&gt;", name)?;
+            }
             if !node.ctx.trace.is_empty() {
                 write!(f, " by ")?;
                 let mut first = true;
@@ -472,7 +478,7 @@ mod tests {
         // Visualize the graph into a PDF file.
         let flow_temp = "target/temp-flow.gv";
         let flow_file = File::create(flow_temp).unwrap();
-        graph.visualize(filename, flow_file, VisualStyle::Instructions).unwrap();
+        graph.visualize(flow_file, &program, filename, VisualStyle::Instructions).unwrap();
         let output = Command::new("dot")
             .arg("-Tpdf")
             .arg(flow_temp)

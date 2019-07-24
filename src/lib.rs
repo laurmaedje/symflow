@@ -1,8 +1,8 @@
 //! A machine code slicer 🚀 for the AMD-64 architecture based on symbolic execution.
 
-// #![allow(unused)]
+#![allow(unused)]
 
-use std::fs::File;
+use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 use std::path::Path;
 use crate::elf::ElfFile;
@@ -24,12 +24,13 @@ pub struct Program {
     pub entry: u64,
     pub binary: Vec<u8>,
     pub code: Vec<(u64, u64, Instruction, Microcode)>,
+    pub symbols: HashMap<u64, String>,
 }
 
 impl Program {
     /// Create a new program from a 64-bit ELF file.
-    pub fn new<S: AsRef<Path>>(filename: S) -> Program {
-        let mut file = ElfFile::new(File::open(filename).unwrap()).unwrap();
+    pub fn new<P: AsRef<Path>>(filename: P) -> Program {
+        let mut file = ElfFile::new(filename).unwrap();
         let text = file.get_section(".text").unwrap();
 
         let entry = file.header.entry;
@@ -49,11 +50,21 @@ impl Program {
             index += len;
         }
 
+        let mut symbols = HashMap::new();
+        if let Ok(symbol_entries) = file.get_symbols() {
+            for entry in symbol_entries {
+                if !entry.name.is_empty() {
+                    symbols.insert(entry.value, entry.name);
+                }
+            }
+        }
+
         Program {
             base,
             entry,
             binary,
             code,
+            symbols
         }
     }
 }

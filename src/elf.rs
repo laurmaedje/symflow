@@ -1,7 +1,9 @@
 //! Parsing of the 64-bit `ELF` file format.
 
+use std::path::Path;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::fmt::{self, Debug, Display, Formatter};
+use std::fs::File;
 use std::ffi::CStr;
 use byteorder::{ReadBytesExt, LE};
 
@@ -56,9 +58,24 @@ pub struct SectionHeader {
     pub entry_size: u64,
 }
 
+impl ElfFile<File> {
+    /// Load an `ELF` file from the file system.
+    pub fn new<P: AsRef<Path>>(filename: P) -> ElfResult<ElfFile<File>> {
+        let file = File::open(filename)?;
+        ElfFile::from_readable(file)
+    }
+}
+
+impl<'a> ElfFile<Cursor<&'a [u8]>> {
+    /// Create a new `ELF` file over a byte slice.
+    pub fn from_slice(target: &'a [u8]) -> ElfResult<ElfFile<Cursor<&'a [u8]>>> {
+        ElfFile::from_readable(Cursor::new(target))
+    }
+}
+
 impl<R> ElfFile<R> where R: Read + Seek {
     /// Create a new `ELF` file operating on a reader.
-    pub fn new(mut target: R) -> ElfResult<ElfFile<R>> {
+    pub fn from_readable(mut target: R) -> ElfResult<ElfFile<R>> {
         let header = parse_header(&mut target)?;
         let section_headers = parse_section_headers(header, &mut target)?;
         Ok(ElfFile { target, header, section_headers })
@@ -82,22 +99,46 @@ impl<R> ElfFile<R> where R: Read + Seek {
 
     /// Retrieve the section with a specific name if it is present.
     pub fn get_section(&mut self, name: &str) -> ElfResult<Section> {
-        let header = self.section_headers.iter()
-            .find(|header| header.name == name)
-            .ok_or_else(|| ElfError::MissingSection(name.to_owned()))?;
+        let header = self.get_section_header(name)?.clone();
 
         let mut data = vec![0; header.size as usize];
         self.target.seek(SeekFrom::Start(header.offset))?;
         self.target.read_exact(&mut data)?;
 
-        Ok(Section { header: header.clone(), data })
+        Ok(Section { header, data })
     }
-}
 
-impl<'a> ElfFile<Cursor<&'a [u8]>> {
-    /// Create a new `ELF` file over a byte slice.
-    pub fn from_slice(target: &'a [u8]) -> ElfResult<ElfFile<Cursor<&'a [u8]>>> {
-        ElfFile::new(Cursor::new(target))
+    /// Retrieve the symbols from the `.symtab` section if it is present.
+    pub fn get_symbols(&mut self) -> ElfResult<Vec<SymbolTableEntry>> {
+        let (size, offset) = {
+            let header = self.get_section_header(".symtab")?;
+            (header.size, header.offset)
+        };
+
+        let count = (size / 24) as usize;
+        let mut symbols = Vec::with_capacity(count);
+        let symbol_strings = self.get_section(".strtab")?.data;
+
+        self.target.seek(SeekFrom::Start(offset))?;
+        for _ in 0 .. count {
+            let name_offset = self.target.read_u32::<LE>()?;
+            symbols.push(SymbolTableEntry {
+                name: parse_string(&symbol_strings, name_offset),
+                info: self.target.read_u8()?,
+                other: self.target.read_u8()?,
+                section_table_index: self.target.read_u16::<LE>()?,
+                value: self.target.read_u64::<LE>()?,
+                size: self.target.read_u64::<LE>()?,
+            })
+        }
+
+        Ok(symbols)
+    }
+
+    fn get_section_header(&mut self, name: &str) -> ElfResult<&SectionHeader> {
+        self.section_headers.iter()
+            .find(|header| header.name == name)
+            .ok_or_else(|| ElfError::MissingSection(name.to_owned()))
     }
 }
 
@@ -135,7 +176,7 @@ fn parse_header<R>(target: &mut R) -> ElfResult<Header> where R: Read + Seek {
     Ok(header)
 }
 
-/// Parse the section headers of the file.
+/// Parse the section headers of the file and return the string table with it.
 fn parse_section_headers<R>(header: Header, target: &mut R)
     -> ElfResult<Vec<SectionHeader>> where R: Read + Seek {
     // Read the section headers.
@@ -168,22 +209,35 @@ fn parse_section_headers<R>(header: Header, target: &mut R)
 
     // Fill in the missing names for all sections.
     for table in headers.iter_mut() {
-        table.name = {
-            let start = table.name_offset as usize;
-            let mut zero = start;
-            while strings[zero] != 0 {
-                zero += 1;
-            }
-
-            let name_str = CStr::from_bytes_with_nul(&strings[start .. zero + 1])
-                .expect("invalid C string in elf string table");
-            name_str.to_string_lossy().into_owned()
-        };
+        table.name = parse_string(&strings, table.name_offset);
     }
 
     Ok(headers)
 }
 
+/// Parse a string from the string table.
+fn parse_string(strings: &[u8], offset: u32) -> String {
+    let mut zero = offset as usize;
+    while strings[zero] != 0 {
+        zero += 1;
+    }
+
+    CStr::from_bytes_with_nul(&strings[offset as usize .. zero + 1])
+        .expect("invalid C string in elf string table")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// An entry in the symbol table.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SymbolTableEntry {
+    pub name: String,
+    pub info: u8,
+    pub other: u8,
+    pub section_table_index: u16,
+    pub value: u64,
+    pub size: u64,
+}
 
 /// The error type for `ELF` loading.
 pub enum ElfError {
