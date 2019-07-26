@@ -58,6 +58,17 @@ pub struct SectionHeader {
     pub entry_size: u64,
 }
 
+/// An entry in the symbol table.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SymbolTableEntry {
+    pub name: String,
+    pub info: u8,
+    pub other: u8,
+    pub section_table_index: u16,
+    pub value: u64,
+    pub size: u64,
+}
+
 impl ElfFile<File> {
     /// Load an `ELF` file from the file system.
     pub fn new<P: AsRef<Path>>(filename: P) -> ElfResult<ElfFile<File>> {
@@ -228,16 +239,6 @@ fn parse_string(strings: &[u8], offset: u32) -> String {
         .into_owned()
 }
 
-/// An entry in the symbol table.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct SymbolTableEntry {
-    pub name: String,
-    pub info: u8,
-    pub other: u8,
-    pub section_table_index: u16,
-    pub value: u64,
-    pub size: u64,
-}
 
 /// The error type for `ELF` loading.
 pub enum ElfError {

@@ -71,8 +71,8 @@ pub struct Block {
     pub addr: u64,
     /// The byte length of the block.
     pub len: u64,
-    /// The addresses and lengths of the instructions of the block alongside their microcode
-    /// representations.
+    /// The addresses and lengths of the instructions of the block alongside
+    /// their microcode representations.
     pub code: Vec<(u64, u64, Instruction, Microcode)>,
 }
 
@@ -84,11 +84,16 @@ impl FlowGraph {
 
     /// Visualize this flow graph in a graphviz DOT file.
     pub fn visualize<W: Write>(
-        &self, target: W, program: &Program,
-        title: &str, style: VisualStyle
+        &self,
+        target: W,
+        program: &Program,
+        title: &str,
+        style: VisualStyle
     ) -> io::Result<()> {
-        const BR: &str = "<br align=\"left\"/>";
+
+        // Rebind the target file for more shortness later on.
         let mut f = target;
+        const BR: &str = "<br align=\"left\"/>";
 
         writeln!(f, "digraph Flow {{")?;
         writeln!(f, "label=<Flow graph for {}<br/><br/>>", title)?;
@@ -278,8 +283,14 @@ impl<'a> FlowConstructor<'a> {
         }
     }
 
-    fn parse_event(&self, maybe_event: Option<Event>, inst: &Instruction,
-        current_addr: u64, next_addr: u64) -> Option<Option<Exit>> {
+    /// Determine the kind of exit resulting from a symbolic execution event.
+    fn parse_event(
+        &self,
+        maybe_event: Option<Event>,
+        inst: &Instruction,
+        current_addr: u64,
+        next_addr: u64
+    ) -> Option<Option<Exit>> {
 
         // An exit can only exist if we got an event from the symbolic execution engine.
         maybe_event.map(|event| {
@@ -306,24 +317,40 @@ impl<'a> FlowConstructor<'a> {
         })
     }
 
-    /// Add reachable blocks to the stack depending on the exit conditions of the
-    /// just parsed block.
-    fn explore_exit(&mut self, node: NodeContext, path: &[NodeContext], exit: Exit, state: SymState) {
+    /// Add reachable blocks to the stack depending on the exit conditions
+    /// of the just parsed block.
+    fn explore_exit(
+        &mut self,
+        node: NodeContext,
+        path: &[NodeContext],
+        exit: Exit,
+        state: SymState
+    ) {
         match exit.target {
             SymExpr::Int(Integer(DataType::N64, target)) => {
-                // Try the not-jumping path.
+                // Try the not-jumping path if it is viable.
                 if exit.condition != Condition::True {
                     let len = self.blocks[&node.addr].len;
                     self.explore_acyclic(
-                        node.addr + len, exit.jumpsite, node.clone(), path,
-                         exit.kind, (exit.condition, false), &state
+                        node.addr + len,
+                        exit.jumpsite,
+                        exit.kind,
+                        (exit.condition, false),
+                        node.clone(),
+                        path,
+                        &state
                     );
                 }
 
                 // Try the jumping path.
                 self.explore_acyclic(
-                    target, exit.jumpsite, node, path,
-                    exit.kind, (exit.condition, true), &state
+                    target,
+                    exit.jumpsite,
+                    exit.kind,
+                    (exit.condition, true),
+                    node,
+                    path,
+                    &state
                 );
             },
 
@@ -332,9 +359,16 @@ impl<'a> FlowConstructor<'a> {
     }
 
     /// Add a target to the stack if it was not visited already through some kind of cycle.
-    fn explore_acyclic(&mut self, addr: u64, jumpsite: u64, node: NodeContext, path: &[NodeContext],
-        kind: ExitKind, condition: (Condition, bool), state: &SymState) {
-
+    fn explore_acyclic(
+        &mut self,
+        addr: u64,
+        jumpsite: u64,
+        kind: ExitKind,
+        condition: (Condition, bool),
+        node: NodeContext,
+        path: &[NodeContext],
+        state: &SymState
+    ) {
         // Check if we are already recursing.
         // We allow to recursive twice because we want to capture the returns
         // of the recursing function to itself and the outside.
@@ -375,6 +409,7 @@ impl<'a> FlowConstructor<'a> {
     }
 }
 
+/// Either reuses an existing block or parses a block from binary.
 #[derive(Debug, Clone)]
 enum BlockParser<'a> {
     Block {
@@ -446,11 +481,12 @@ impl<'a> BlockParser<'a> {
     }
 }
 
-/// Remove all call cycles from the call trace.
-fn decycle<T: Clone, F>(trace: &[T], cmp: F) -> Vec<T> where F: Fn(&T, &T) -> bool {
+/// Remove all cycles from a list of comparable items, where `cmp` determines
+/// if two items are equal.
+fn decycle<T: Clone, F>(sequence: &[T], cmp: F) -> Vec<T> where F: Fn(&T, &T) -> bool {
     let mut out = Vec::new();
 
-    for item in trace {
+    for item in sequence {
         if let Some(pos) = out.iter().position(|x| cmp(item, x)) {
             for _ in 0 .. out.len() - pos - 1 {
                 out.pop();
@@ -472,8 +508,8 @@ mod tests {
 
     fn test(filename: &str) {
         // Generate the flow graph.
-        let program = &Program::new(filename);
-        let graph = FlowGraph::new(program);
+        let program = Program::new(filename);
+        let graph = FlowGraph::new(&program);
 
         // Visualize the graph into a PDF file.
         let flow_temp = "target/temp-flow.gv";
