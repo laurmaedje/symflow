@@ -1,5 +1,5 @@
 target := ../target/
-names := block-1 block-2 case twice loop recursive-1 recursive-2 func
+names := block-1 block-2 case twice loop recursive-1 recursive-2 func bufs
 bins := $(addprefix $(target), $(names))
 
 all: $(bins)

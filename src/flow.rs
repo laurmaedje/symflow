@@ -53,17 +53,6 @@ impl NodeContext {
     }
 }
 
-/// How to visualize the flow graph.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum VisualStyle {
-    /// Only display the addresses and call traces of blocks.
-    Addresses,
-    /// Show the assembly instructions.
-    Instructions,
-    /// Show the whole microcode representation of the instructions.
-    Microcode,
-}
-
 /// A single flat jump-free sequence of micro operations.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Block {
@@ -156,6 +145,17 @@ impl FlowGraph {
 
         writeln!(f, "}}")
     }
+}
+
+/// How to visualize the flow graph.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum VisualStyle {
+    /// Only display the addresses and call traces of blocks.
+    Addresses,
+    /// Show the assembly instructions.
+    Instructions,
+    /// Show the whole microcode representation of the instructions.
+    Microcode,
 }
 
 /// Constructs a flow graph representation of a program.
@@ -292,29 +292,27 @@ impl<'a> FlowConstructor<'a> {
         next_addr: u64
     ) -> Option<Option<Exit>> {
 
-        // An exit can only exist if we got an event from the symbolic execution engine.
-        maybe_event.map(|event| {
-            match event {
-                // If it is a jump, add the exit to the list.
-                Event::Jump { target, condition, relative } => {
-                    Some(Exit {
-                        target: if relative {
-                            target.clone().add(SymExpr::Int(Integer::from_ptr(next_addr)))
-                        } else {
-                            target.clone()
-                        },
-                        kind: match inst.mnemoic {
-                            Mnemoic::Call => ExitKind::Call,
-                            Mnemoic::Ret => ExitKind::Return,
-                            _ => ExitKind::Jump,
-                        },
-                        jumpsite: current_addr,
-                        condition,
-                    })
-                },
-                Event::Exit => None,
-            }
-        })
+        match maybe_event {
+            // If it is a jump, add the exit to the list.
+            Some(Event::Jump { target, condition, relative }) => Some(
+                Some(Exit {
+                    target: if relative {
+                        target.clone().add(SymExpr::Int(Integer::from_ptr(next_addr)))
+                    } else {
+                        target.clone()
+                    },
+                    kind: match inst.mnemoic {
+                        Mnemoic::Call => ExitKind::Call,
+                        Mnemoic::Ret => ExitKind::Return,
+                        _ => ExitKind::Jump,
+                    },
+                    jumpsite: current_addr,
+                    condition,
+                })
+            ),
+            Some(Event::Exit) => Some(None),
+            _ => None,
+        }
     }
 
     /// Add reachable blocks to the stack depending on the exit conditions
@@ -536,6 +534,7 @@ mod tests {
         test("target/recursive-1");
         test("target/recursive-2");
         test("target/func");
+        test("target/bufs");
     }
 
     fn test_decycle(left: Vec<&str>, right: Vec<&str>) {

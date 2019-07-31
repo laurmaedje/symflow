@@ -186,6 +186,7 @@ impl<'a> Decoder<'a> {
             &[0x01] => (Mnemoic::Add, RegRm(scaled, scaled, false)),
             &[0x03] => (Mnemoic::Add, RegRm(scaled, scaled, true)),
             &[0x83] if ext == Some(0) => (Mnemoic::Add, RmIm(scaled, N8)),
+            &[0x81] if ext == Some(5) => (Mnemoic::Sub, RmIm(scaled, N32)),
             &[0x83] if ext == Some(5) => (Mnemoic::Sub, RmIm(scaled, N8)),
             &[0x0f, 0xaf] => (Mnemoic::Imul, RegRm(scaled, scaled, true)),
 
@@ -195,6 +196,7 @@ impl<'a> Decoder<'a> {
             &[0x88] => (Mnemoic::Mov, RegRm(N8, N8, false)),
             &[0x89] => (Mnemoic::Mov, RegRm(scaled, scaled, false)),
             &[0x8b] => (Mnemoic::Mov, RegRm(scaled, scaled, true)),
+            &[0xc6] if ext == Some(0) => (Mnemoic::Mov, RmIm(N8, N8)),
             &[0xc7] => (Mnemoic::Mov, RmIm(scaled, N32)),
             &[x] if 0xb8 <= x && x < 0xc0 => (Mnemoic::Mov, PlusIm(0xb8, scaled, scaled)),
             &[0x0f, 0xb6] => (Mnemoic::Movzx, RegRm(scaled, N8, true)),
@@ -521,6 +523,8 @@ mod tests {
         test(&[0x3c, 0x40], "cmp al, 0x40");
         test(&[0xff, 0xd2], "call rdx");
         test(&[0x48, 0x8d, 0x05, 0xcb, 0xff, 0xff, 0xff], "lea rax, qword ptr [rip-0x35]");
+        test(&[0x48, 0x81, 0xec, 0x20, 0x04, 0x00, 0x00], "sub rsp, 0x420");
+        test(&[0xc6, 0x00, 0x21], "mov byte ptr [rax], 0x21");
 
         assert_eq!(Instruction::decode(&[0x12, 0x34]).unwrap_err().0, vec![0x12, 0x34]);
     }

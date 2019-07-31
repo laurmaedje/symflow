@@ -13,6 +13,7 @@ pub mod amd64;
 pub mod elf;
 pub mod ir;
 pub mod flow;
+pub mod slice;
 pub mod sym;
 pub mod num;
 
@@ -99,17 +100,18 @@ mod tests {
 
     #[test]
     fn program() {
-        load_program("target/block-1");
-        load_program("target/block-2");
-        load_program("target/case");
-        load_program("target/twice");
-        load_program("target/loop");
-        load_program("target/recursive-1");
-        load_program("target/recursive-2");
-        load_program("target/func");
+        // load_program("target/block-1");
+        // load_program("target/block-2");
+        // load_program("target/case");
+        // load_program("target/twice");
+        // load_program("target/loop");
+        // load_program("target/recursive-1");
+        // load_program("target/recursive-2");
+        // load_program("target/func");
+        load_program("target/bufs");
     }
 
     fn load_program(filename: &str) {
-        println!("{}: {}\n", filename, Program::new(filename));
+        println!("{}: {:#}\n", filename, Program::new(filename));
     }
 }

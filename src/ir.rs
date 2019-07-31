@@ -16,8 +16,9 @@ pub struct Microcode {
 pub enum MicroOperation {
     /// Store the value at location `src` in location `dest`.
     Mov { dest: Location, src: Location },
-    /// Store a constant in location `dest`.
-    Const { dest: Location, constant: Integer },
+
+    /// Store a constant in the temporary `dest`.
+    Const { dest: Temporary, constant: Integer },
     /// Cast the temporary `target` to another type.
     /// - If the target type is smaller, it will get truncated.
     /// - If the target type is bigger, if signed is true the value will be
@@ -243,7 +244,7 @@ impl MicroEncoder {
         // stack pointer.
         let offset = Temporary(DataType::N64, self.temps);
         let constant = Integer(DataType::N64, data_type.bytes());
-        self.ops.push(MicroOperation::Const { dest: Location::Temp(offset), constant });
+        self.ops.push(MicroOperation::Const { dest: offset, constant });
         self.ops.push(MicroOperation::Sub { diff: stack, a: stack, b: offset });
         self.temps += 1;
 
@@ -269,7 +270,7 @@ impl MicroEncoder {
         // stack pointer. Then copy the stack pointer back into it's register.
         let offset = Temporary(DataType::N64, self.temps);
         let constant = Integer(DataType::N64, data_type.bytes());
-        self.ops.push(MicroOperation::Const { dest: Location::Temp(offset), constant });
+        self.ops.push(MicroOperation::Const { dest: offset, constant });
         self.ops.push(MicroOperation::Add { sum: stack, a: stack, b: offset });
         self.temps += 1;
         self.encode_move(sp, Location::Temp(stack))
@@ -326,16 +327,16 @@ impl MicroEncoder {
                 let reg = self.encode_load_reg(reg);
 
                 // Load the displacement constant into a temporary.
-                let constant = Temporary(DataType::N64, self.temps);
+                let offset = Temporary(DataType::N64, self.temps);
                 self.ops.push(MicroOperation::Const {
-                    dest: Location::Temp(constant),
+                    dest: offset,
                     constant: Integer(DataType::N64, displace as u64)
                 });
 
                 // Compute the final address.
                 self.ops.push(MicroOperation::Add {
                     sum: Temporary(DataType::N64, self.temps + 1),
-                    a: reg, b: constant
+                    a: reg, b: offset
                 });
                 self.temps += 2;
 
@@ -368,15 +369,10 @@ impl MicroEncoder {
 
     /// Encode the loading of a constant into a temporary.
     fn encode_load_constant(&mut self, data_type: DataType, constant: u64) -> Temporary {
-        let temp = Temporary(data_type, self.temps);
-
-        self.ops.push(MicroOperation::Const {
-            dest: Location::Temp(temp),
-            constant: Integer(data_type, constant)
-        });
+        let dest = Temporary(data_type, self.temps);
+        self.ops.push(MicroOperation::Const { dest, constant: Integer(data_type, constant) });
         self.temps += 1;
-
-        temp
+        dest
     }
 
     /// Encode moving with a cast to the destination source type.

@@ -21,7 +21,7 @@ impl SymState {
     pub fn new() -> SymState {
         SymState {
             temporaries: HashMap::new(),
-            memory: [SymMemory::new(), SymMemory::new()],
+            memory: [SymMemory::new(0), SymMemory::new(1)],
         }
     }
 
@@ -31,8 +31,17 @@ impl SymState {
 
         self.set_reg(Register::RIP, Int(Integer::from_ptr(addr)));
         match operation {
-            Op::Mov { dest, src } => self.do_move(dest, src),
-            Op::Const { dest, constant } => self.write_location(dest, SymExpr::Int(constant)),
+            Op::Mov { dest, src } => {
+                self.do_move(dest, src);
+
+                if let Some(address) = self.address_of(dest) {
+                    return Some(Event::MemoryAccess { address, writing: true });
+                } else if let Some(address) = self.address_of(src) {
+                    return Some(Event::MemoryAccess { address, writing: true });
+                }
+            },
+
+            Op::Const { dest, constant } => self.set_temp(dest, SymExpr::Int(constant)),
             Op::Cast { target, new, signed } => {
                 let new_value = self.get_temp(target).cast(new, signed);
                 self.set_temp(Temporary(new, target.1), new_value);
@@ -167,6 +176,15 @@ impl SymState {
         }
     }
 
+    /// The address in main memory corresponding to this location.
+    fn address_of(&self, location: Location) -> Option<SymExpr> {
+        match location {
+            Location::Direct(_, 0, addr) => Some(SymExpr::Int(Integer::from_ptr(addr))),
+            Location::Indirect(_, 0, temp) => Some(self.get_temp(temp)),
+            _ => None,
+        }
+    }
+
     /// Return the integer stored in the temporary.
     fn get_temp(&self, temp: Temporary) -> SymExpr {
         let expr = self.temporaries[&temp.1].clone();
@@ -195,6 +213,7 @@ impl SymState {
 #[derive(Debug, Clone)]
 pub enum Event {
     Jump { target: SymExpr, condition: Condition, relative: bool },
+    MemoryAccess { address: SymExpr, writing: bool },
     Exit,
 }
 
@@ -202,6 +221,7 @@ pub enum Event {
 /// values and addresses.
 #[derive(Debug, Clone)]
 pub struct SymMemory {
+    id: usize,
     data: RefCell<MemoryData>,
 }
 
@@ -215,9 +235,10 @@ struct MemoryData {
 }
 
 impl SymMemory {
-    /// Create a new blank symbolic memory.
-    pub fn new() -> SymMemory {
+    /// Create a new blank symbolic memory where symbolics start at `base`.
+    pub fn new(id: usize) -> SymMemory {
         SymMemory {
+            id,
             data: RefCell::new(MemoryData {
                 map: HashMap::new(),
                 symbols: 0,
@@ -240,7 +261,7 @@ impl SymMemory {
                 expr.clone().cast(data_type, false)
             },
             None => {
-                let value = SymExpr::Sym(Symbol(data_type, data.symbols));
+                let value = SymExpr::Sym(Symbol(data_type, self.id, data.symbols));
                 data.map.insert(addr, value.clone());
                 data.symbols += 1;
                 value
@@ -262,7 +283,7 @@ impl SymMemory {
     pub fn new_symbol(&mut self, data_type: DataType) -> Symbol {
         let mut data = self.data.borrow_mut();
         data.symbols += 1;
-        Symbol(data_type, data.symbols - 1)
+        Symbol(data_type, self.id, data.symbols - 1)
     }
 }
 
@@ -311,12 +332,11 @@ macro_rules! bin_expr {
 macro_rules! bin_expr_simplifying {
     ($func:ident, $a:ident, $b:ident, $target:expr) => {
         pub fn $func(self, other: SymExpr) -> SymExpr {
-            fn boxed(expr: SymExpr) -> Box<SymExpr> { Box::new(expr) }
             fn add_or_sub(expr: SymExpr, a: Integer, b: Integer) -> SymExpr {
-                if a > b {
-                    Add(boxed(expr), boxed(Int(a - b)))
-                } else {
+                if a.flagged_sub(b).1.sign {
                     Sub(boxed(expr), boxed(Int(b - a)))
+                } else {
+                    Add(boxed(expr), boxed(Int(a - b)))
                 }
             }
             let $a = self;
@@ -335,6 +355,11 @@ macro_rules! cmp_expr {
             }
         }
     };
+}
+
+/// Shorthand for `Box::new`.
+fn boxed(expr: SymExpr) -> Box<SymExpr> {
+    Box::new(expr)
 }
 
 impl SymExpr {
@@ -420,7 +445,16 @@ impl SymExpr {
     pub fn cast(self, new: DataType, signed: bool) -> SymExpr {
         match self {
             Int(x) => Int(x.cast(new, signed)),
-            s => Cast(Box::new(s), new, signed),
+            Cast(x, t, false) => if x.data_type() == new {
+                *x
+            } else if t.bytes() < new.bytes() {
+                Cast(x, new, false)
+            } else {
+                Cast(boxed(Cast(x, t, false)), new, signed)
+            },
+            s => if s.data_type() == new { s } else {
+                Cast(boxed(s), new, signed)
+            },
         }
     }
 }
@@ -449,11 +483,11 @@ impl Display for SymExpr {
 
 /// A symbol value identified by an index.
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
-pub struct Symbol(pub DataType, pub usize);
+pub struct Symbol(pub DataType, pub usize, pub usize);
 
 impl Display for Symbol {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "s{}:{}", self.1, self.0)
+        write!(f, "s{}-{}:{}", self.1, self.2, self.0)
     }
 }
 
@@ -470,24 +504,20 @@ mod tests {
         let eight = || Int(Integer(N64, 8));
         let ten = || Int(Integer(N64, 10));
         let fifteen  = || Int(Integer(N64, 15));
-        let x = || Sym(Symbol(N64, 0));
+        let x = || Sym(Symbol(N64, 0, 0));
 
         assert_eq!(x().add(zero()), x());
         assert_eq!(ten().add(zero()), ten());
-
-        assert_eq!(x().add(five()).add(ten()),
-            Add(Box::new(x()), Box::new(fifteen())));
-
-        assert_eq!(x().sub(five()).add(ten()),
-            Add(Box::new(x()), Box::new(five())));
-
-        assert_eq!(x().sub(ten()).sub(five()),
-            Sub(Box::new(x()), Box::new(fifteen())));
-
-        assert_eq!(x().add(ten()).sub(five()),
-            Add(Box::new(x()), Box::new(five())));
-
+        assert_eq!(x().add(five()).add(ten()), Add(boxed(x()), boxed(fifteen())));
+        assert_eq!(x().sub(five()).add(ten()), Add(boxed(x()), boxed(five())));
+        assert_eq!(x().sub(ten()).sub(five()), Sub(boxed(x()), boxed(fifteen())));
+        assert_eq!(x().add(ten()).sub(five()), Add(boxed(x()), boxed(five())));
         assert_eq!(x().sub(eight()).sub(eight()).add(eight()),
-            Sub(Box::new(x()), Box::new(Int(Integer(N64, 8)))));
+            Sub(boxed(x()), boxed(Int(Integer(N64, 8)))));
+
+        let y = || Sym(Symbol(N8, 0, 0));
+        assert_eq!(y().cast(N32, false).cast(N8, false), y());
+        assert_eq!(y().cast(N32, false).cast(N64, false), y().cast(N64, false));
+        assert_eq!(y().cast(N8, false), y());
     }
 }
