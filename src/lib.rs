@@ -15,6 +15,7 @@ pub mod ir;
 pub mod flow;
 pub mod slice;
 pub mod sym;
+pub mod expr;
 pub mod num;
 
 

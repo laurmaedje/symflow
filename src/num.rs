@@ -81,7 +81,7 @@ impl Integer {
 
     /// Convert this integer into bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = vec![0; self.0.bytes() as usize];
+        let mut buf = vec![0; self.0.bytes()];
         match self.0 {
             N8  => buf[0] = self.1 as u8,
             N16 => LittleEndian::write_u16(&mut buf, self.1 as u16),
@@ -197,13 +197,18 @@ impl DataType {
     }
 
     /// Number of bytes this data type needs to be stored.
-    pub fn bytes(&self) -> u64 {
+    pub fn bytes(&self) -> usize {
         match self {
             N8 => 1,
             N16 => 2,
             N32 => 4,
             N64 => 8,
         }
+    }
+
+    /// Number of bits this data types needs to be stored.
+    pub fn bits(&self) -> usize {
+        self.bytes() * 8
     }
 }
 

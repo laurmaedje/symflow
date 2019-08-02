@@ -40,11 +40,11 @@ pub enum MicroOperation {
     Not { not: Temporary, a: Temporary },
 
     /// Set the target temporary to one if the condition is true and to zero otherwise.
-    Set { target: Temporary, condition: Condition },
+    Set { target: Temporary, condition: JumpCondition },
     /// Jump to the current address plus the `offset` if `relative` is true,
     /// otherwise directly to the target if the condition specified by `condition`
     /// is fulfilled.
-    Jump { target: Temporary, condition: Condition, relative: bool },
+    Jump { target: Temporary, condition: JumpCondition, relative: bool },
 
     /// Perform a syscall.
     Syscall,
@@ -137,18 +137,18 @@ impl MicroEncoder {
             },
 
             // Jump to the first operand under specific conditions.
-            Jmp => self.encode_jump(inst, Condition::True),
-            Je => self.encode_comp_jump(inst, Condition::Equal)?,
-            Jl => self.encode_comp_jump(inst, Condition::Less)?,
-            Jle => self.encode_comp_jump(inst, Condition::LessEqual)?,
-            Jg => self.encode_comp_jump(inst, Condition::Greater)?,
-            Jge => self.encode_comp_jump(inst, Condition::GreaterEqual)?,
+            Jmp => self.encode_jump(inst, JumpCondition::True),
+            Je => self.encode_comp_jump(inst, JumpCondition::Equal)?,
+            Jl => self.encode_comp_jump(inst, JumpCondition::Less)?,
+            Jle => self.encode_comp_jump(inst, JumpCondition::LessEqual)?,
+            Jg => self.encode_comp_jump(inst, JumpCondition::Greater)?,
+            Jge => self.encode_comp_jump(inst, JumpCondition::GreaterEqual)?,
 
             // Save the procedure linking information on the stack and jump.
             Call => {
                 let rip = self.encode_get_location(Operand::Direct(Register::RIP));
                 self.encode_push(rip)?;
-                self.encode_jump(inst, Condition::True);
+                self.encode_jump(inst, JumpCondition::True);
             },
 
             // Copies the base pointer into the stack pointer register and pops the
@@ -165,7 +165,7 @@ impl MicroEncoder {
                 let target = Temporary(DataType::N64, self.temps);
                 self.temps += 1;
                 self.encode_pop(Location::Temp(target))?;
-                self.ops.push(Op::Jump { target, condition: Condition::True, relative: false });
+                self.ops.push(Op::Jump { target, condition: JumpCondition::True, relative: false });
             },
 
             Cmp => {
@@ -176,7 +176,7 @@ impl MicroEncoder {
                 let ((_, left), (_, right)) = self.encode_load_both(inst);
                 self.last_comparison = Some(Comparison::And(left, right));
             }
-            Setl => self.encode_comp_set(inst, Condition::Less)?,
+            Setl => self.encode_comp_set(inst, JumpCondition::Less)?,
 
             Syscall => { self.ops.push(Op::Syscall); },
             Nop => {},
@@ -203,7 +203,7 @@ impl MicroEncoder {
     }
 
     /// Encode a conditional, relative jump.
-    fn encode_jump(&mut self, inst: &Instruction, condition: Condition) {
+    fn encode_jump(&mut self, inst: &Instruction, condition: JumpCondition) {
         let operand = inst.operands[0];
         let relative = match operand {
             Operand::Offset(_) => true,
@@ -215,12 +215,12 @@ impl MicroEncoder {
 
     /// Encode a jump from the last comparison.
     fn encode_comp_jump<F>(&mut self, inst: &Instruction, comp: F) -> EncoderResult<()>
-    where F: FnOnce(Comparison) -> Condition {
+    where F: FnOnce(Comparison) -> JumpCondition {
         Ok(self.encode_jump(inst, comp(self.get_comparison()?)))
     }
 
     /// Encode a set instruction, which sets a bit based on a condition.
-    fn encode_set(&mut self, inst: &Instruction, condition: Condition) -> EncoderResult<()> {
+    fn encode_set(&mut self, inst: &Instruction, condition: JumpCondition) -> EncoderResult<()> {
         let location = self.encode_get_location(inst.operands[0]);
         let temp = Temporary(location.data_type(), self.temps);
         self.temps += 1;
@@ -230,7 +230,7 @@ impl MicroEncoder {
 
     /// Encode a set from the last comparison.
     fn encode_comp_set<F>(&mut self, inst: &Instruction, comp: F) -> EncoderResult<()>
-    where F: FnOnce(Comparison) -> Condition {
+    where F: FnOnce(Comparison) -> JumpCondition {
         self.encode_set(inst, comp(self.get_comparison()?))
     }
 
@@ -243,7 +243,7 @@ impl MicroEncoder {
         // Load the width of the moved thing as a constant and subtract it from the
         // stack pointer.
         let offset = Temporary(DataType::N64, self.temps);
-        let constant = Integer(DataType::N64, data_type.bytes());
+        let constant = Integer(DataType::N64, data_type.bytes() as u64);
         self.ops.push(MicroOperation::Const { dest: offset, constant });
         self.ops.push(MicroOperation::Sub { diff: stack, a: stack, b: offset });
         self.temps += 1;
@@ -269,7 +269,7 @@ impl MicroEncoder {
         // Load the width of the moved thing as a constant and add it to the
         // stack pointer. Then copy the stack pointer back into it's register.
         let offset = Temporary(DataType::N64, self.temps);
-        let constant = Integer(DataType::N64, data_type.bytes());
+        let constant = Integer(DataType::N64, data_type.bytes() as u64);
         self.ops.push(MicroOperation::Const { dest: offset, constant });
         self.ops.push(MicroOperation::Add { sum: stack, a: stack, b: offset });
         self.temps += 1;
@@ -420,8 +420,8 @@ impl Display for MicroOperation {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         use MicroOperation::*;
 
-        fn show_condition(cond: Condition) -> String {
-            if let Condition::True = cond { "".to_string() } else { format!(" if {}", cond) }
+        fn show_condition(cond: JumpCondition) -> String {
+            if let JumpCondition::True = cond { "".to_string() } else { format!(" if {}", cond) }
         }
 
         match *self {
@@ -488,9 +488,9 @@ impl Display for Temporary {
     }
 }
 
-/// Condition for jumps and sets.
+/// JumpCondition for jumps and sets.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub enum Condition {
+pub enum JumpCondition {
     True,
     Equal(Comparison),
     Less(Comparison),
@@ -508,10 +508,10 @@ pub enum Comparison {
     And(Temporary, Temporary),
 }
 
-impl Condition {
+impl JumpCondition {
     /// Return a more readable version of the condition.
     pub fn pretty_format(&self, value: bool) -> String {
-        use Condition::*;
+        use JumpCondition::*;
         use Comparison::*;
         match (self, value) {
             (True, true) => "True".to_string(),
@@ -536,15 +536,15 @@ impl Condition {
     }
 }
 
-impl Display for Condition {
+impl Display for JumpCondition {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            Condition::True => write!(f, "true"),
-            Condition::Equal(com) => write!(f, "{} equal", com),
-            Condition::Less(com) => write!(f, "{} less", com),
-            Condition::LessEqual(com) => write!(f, "{} less/equal", com),
-            Condition::Greater(com) => write!(f, "{} greater", com),
-            Condition::GreaterEqual(com) => write!(f, "{} greater/equal", com),
+            JumpCondition::True => write!(f, "true"),
+            JumpCondition::Equal(com) => write!(f, "{} equal", com),
+            JumpCondition::Less(com) => write!(f, "{} less", com),
+            JumpCondition::LessEqual(com) => write!(f, "{} less/equal", com),
+            JumpCondition::Greater(com) => write!(f, "{} greater", com),
+            JumpCondition::GreaterEqual(com) => write!(f, "{} greater/equal", com),
         }
     }
 }

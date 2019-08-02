@@ -5,8 +5,9 @@ use std::io::{self, Write};
 
 use crate::Program;
 use crate::amd64::{Instruction, Mnemoic};
-use crate::ir::{Microcode, MicroEncoder, Condition};
-use crate::sym::{SymState, SymExpr, Event};
+use crate::ir::{Microcode, MicroEncoder, JumpCondition};
+use crate::sym::{SymState, Event};
+use crate::expr::SymExpr;
 use crate::num::{Integer, DataType};
 
 
@@ -20,7 +21,7 @@ pub struct FlowGraph {
     pub blocks: HashMap<u64, Block>,
     /// The control flow between the nodes. The key pairs are indices
     /// into the `nodes` vector.
-    pub edges: HashMap<(usize, usize), (Condition, bool)>,
+    pub edges: HashMap<(usize, usize), (JumpCondition, bool)>,
 }
 
 /// A node in the control flow graph is a basic block with context and edges.
@@ -137,7 +138,7 @@ impl FlowGraph {
         edges.sort_by_key(|edge| edge.0);
         for ((start, end), &(condition, value)) in edges {
             write!(f, "b{} -> b{} [", start, end)?;
-            if condition != Condition::True {
+            if condition != JumpCondition::True {
                 write!(f, "label=\"[{}]\", ", condition.pretty_format(value))?;
             }
             writeln!(f, "style=dashed, color=grey]")?;
@@ -166,7 +167,7 @@ struct FlowConstructor<'a> {
     stack: Vec<(NodeContext, Vec<NodeContext>, SymState)>,
     nodes: HashMap<NodeContext, usize>,
     blocks: HashMap<u64, Block>,
-    edges: HashMap<(usize, usize), (Condition, bool)>,
+    edges: HashMap<(usize, usize), (JumpCondition, bool)>,
 }
 
 /// An exit of a block.
@@ -174,7 +175,7 @@ struct FlowConstructor<'a> {
 struct Exit {
     target: SymExpr,
     jumpsite: u64,
-    condition: Condition,
+    condition: JumpCondition,
     kind: ExitKind,
 }
 
@@ -327,7 +328,7 @@ impl<'a> FlowConstructor<'a> {
         match exit.target {
             SymExpr::Int(Integer(DataType::N64, target)) => {
                 // Try the not-jumping path if it is viable.
-                if exit.condition != Condition::True {
+                if exit.condition != JumpCondition::True {
                     let len = self.blocks[&node.addr].len;
                     self.explore_acyclic(
                         node.addr + len,
@@ -362,7 +363,7 @@ impl<'a> FlowConstructor<'a> {
         addr: u64,
         jumpsite: u64,
         kind: ExitKind,
-        condition: (Condition, bool),
+        condition: (JumpCondition, bool),
         node: NodeContext,
         path: &[NodeContext],
         state: &SymState
