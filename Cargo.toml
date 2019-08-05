@@ -1,5 +1,5 @@
 [package]
-name = "symslice"
+name = "symflow"
 version = "0.1.0"
 authors = ["Laurenz <laurmaedje@gmail.com>"]
 edition = "2018"

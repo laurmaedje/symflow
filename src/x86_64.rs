@@ -1,7 +1,8 @@
-//! Decoding of `AMD64` instructions.
+//! Decoding of `x86_64` instructions.
 
 use std::fmt::{self, Debug, Display, Formatter};
 use byteorder::{ByteOrder, LittleEndian};
+
 use crate::num::DataType;
 
 
@@ -255,7 +256,7 @@ impl<'a> Decoder<'a> {
             (_, 0b10) | (0b101, 0b00)
                 => (Some(LittleEndian::read_i32(&self.bytes[self.index ..]) as i64), 4),
             (_, 0b11) => (None, 0),
-            _ => panic!("decode_displacement: invalid combination"),
+            _ => unreachable!(),
         };
         self.index += off;
         displace

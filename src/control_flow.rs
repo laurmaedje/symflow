@@ -1,53 +1,45 @@
-//! Flow graph calculation.
+//! Control flow graph calculation.
 
 use std::collections::HashMap;
 use std::io::{self, Write};
 
 use crate::Program;
-use crate::amd64::{Instruction, Mnemoic};
+use crate::x86_64::{Instruction, Mnemoic};
 use crate::ir::{Microcode, MicroEncoder, JumpCondition};
-use crate::sym::{SymState, Event};
-use crate::expr::SymExpr;
 use crate::num::{Integer, DataType};
+use crate::expr::SymExpr;
+use crate::sym::{SymState, Event};
 
 
-/// Control flow graph representation of a program.
+/// The control flow graph representation of a program.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FlowGraph {
-    /// The nodes of the graph (i.e. basic blocks within a context)
-    /// alongside their outgoing and incoming edges (the nodes they point to).
+    /// The nodes of the graph (i.e. basic blocks within a context).
     pub nodes: Vec<FlowNode>,
     /// The basic blocks without context.
-    pub blocks: HashMap<u64, Block>,
+    pub blocks: HashMap<u64, BasicBlock>,
     /// The control flow between the nodes. The key pairs are indices
     /// into the `nodes` vector.
     pub edges: HashMap<(usize, usize), (JumpCondition, bool)>,
+    /// The nodes which the node with the index has edges to.
+    pub incoming: Vec<Vec<usize>>,
+    /// The nodes which have edges to the node with the index.
+    pub outgoing: Vec<Vec<usize>>,
 }
 
-/// A node in the control flow graph is a basic block with context and edges.
+/// A node in the control flow graph, that is a basic block in some context.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FlowNode {
-    /// The block and calling context of this node.
-    pub ctx: NodeContext,
-    /// The indices of the nodes this node is flowing into.
-    pub out: Vec<usize>,
-    /// The indices of the nodes flowing into this node.
-    pub inc: Vec<usize>,
-}
-
-/// A basic block in some context.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct NodeContext {
     /// The start address of the block.
     pub addr: u64,
     /// The call trace in (callsite, target) pairs.
     pub trace: Vec<(u64, u64)>,
 }
 
-impl NodeContext {
+impl FlowNode {
     /// Return the same node but without cycles in the trace.
-    fn decycled(&self) -> NodeContext {
-        NodeContext {
+    fn decycled(&self) -> FlowNode {
+        FlowNode {
             addr: self.addr,
             trace: decycle(&self.trace, |a, b| a.1 == b.1)
         }
@@ -56,7 +48,7 @@ impl NodeContext {
 
 /// A single flat jump-free sequence of micro operations.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct Block {
+pub struct BasicBlock {
     /// The adress of the block.
     pub addr: u64,
     /// The byte length of the block.
@@ -78,7 +70,7 @@ impl FlowGraph {
         target: W,
         program: &Program,
         title: &str,
-        style: VisualStyle
+        style: VisualizationStyle
     ) -> io::Result<()> {
 
         // Rebind the target file for more shortness later on.
@@ -95,25 +87,25 @@ impl FlowGraph {
         // Export the blocks.
         for (index, node) in self.nodes.iter().enumerate() {
             // Format the header of the block box.
-            write!(f, "b{} [label=<<b>{:x}", index, node.ctx.addr)?;
-            if let Some(name) = program.symbols.get(&node.ctx.addr) {
+            write!(f, "b{} [label=<<b>{:x}", index, node.addr)?;
+            if let Some(name) = program.symbols.get(&node.addr) {
                 write!(f, " &lt;{}&gt;", name)?;
             }
-            if !node.ctx.trace.is_empty() {
+            if !node.trace.is_empty() {
                 write!(f, " by ")?;
                 let mut first = true;
-                for (callsite, _) in &node.ctx.trace {
+                for (callsite, _) in &node.trace {
                     if !first { write!(f, " -&gt; ")?; } first = false;
                     write!(f, "{:x}", callsite)?;
                 }
             }
             write!(f, "</b>{}", BR)?;
 
-            if style == VisualStyle::Instructions || style == VisualStyle::Microcode {
+            if style == VisualizationStyle::Instructions || style == VisualizationStyle::Microcode {
                 // Write out the body in either micro operations or instructions.
-                let block = &self.blocks[&node.ctx.addr];
+                let block = &self.blocks[&node.addr];
                 for (addr, _, instruction, microcode) in &block.code {
-                    if style == VisualStyle::Microcode {
+                    if style == VisualizationStyle::Microcode {
                         for op in &microcode.ops {
                             write!(f, "{:x}: {}{}", addr,
                                 op.to_string().replace("&", "&amp;"), BR)?;
@@ -126,7 +118,7 @@ impl FlowGraph {
             write!(f, ">, shape=box")?;
 
             // Change the background if this nodes is either a source or sink.
-            if node.out.is_empty() || node.inc.is_empty() {
+            if self.outgoing[index].is_empty() || self.incoming[index].is_empty() {
                 write!(f, ", style=filled, fillcolor=\"#dddddd\"")?;
             }
             writeln!(f, "]")?;
@@ -150,7 +142,7 @@ impl FlowGraph {
 
 /// How to visualize the flow graph.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum VisualStyle {
+pub enum VisualizationStyle {
     /// Only display the addresses and call traces of blocks.
     Addresses,
     /// Show the assembly instructions.
@@ -164,9 +156,9 @@ pub enum VisualStyle {
 struct FlowConstructor<'a> {
     binary: &'a [u8],
     base: u64,
-    stack: Vec<(NodeContext, Vec<NodeContext>, SymState)>,
-    nodes: HashMap<NodeContext, usize>,
-    blocks: HashMap<u64, Block>,
+    stack: Vec<(FlowNode, Vec<FlowNode>, SymState)>,
+    nodes: HashMap<FlowNode, usize>,
+    blocks: HashMap<u64, BasicBlock>,
     edges: HashMap<(usize, usize), (JumpCondition, bool)>,
 }
 
@@ -202,7 +194,7 @@ impl<'a> FlowConstructor<'a> {
 
     /// Build the flow graph.
     fn construct(mut self, entry: u64) -> FlowGraph {
-        self.stack.push((NodeContext {
+        self.stack.push((FlowNode {
             addr: entry,
             trace: vec![],
         }, vec![], SymState::new()));
@@ -225,37 +217,36 @@ impl<'a> FlowConstructor<'a> {
         }
 
         // Arrange the nodes into a vector.
-        let mut nodes = vec![FlowNode {
-            ctx: NodeContext { addr: 0, trace: Vec::new() },
-            out: Vec::new(),
-            inc: Vec::new(),
-        }; self.nodes.len()];
+        let count = self.nodes.len();
+        let mut nodes = vec![FlowNode { addr: 0, trace: Vec::new() }; count];
+        let mut incoming = vec![Vec::new(); count];
+        let mut outgoing = vec![Vec::new(); count];
 
-        for (ctx, index) in self.nodes.into_iter() {
-            nodes[index].ctx = ctx;
+        for (node, index) in self.nodes.into_iter() {
+            nodes[index] = node;
         }
 
         // Add the outgoing and incoming edges to the nodes.
         for &(start, end) in self.edges.keys() {
-            nodes[start].out.push(end);
-            nodes[end].inc.push(start);
+            outgoing[start].push(end);
+            incoming[end].push(start);
         }
 
         // Sort the outgoing and incoming vectors to make things deterministic.
-        for node in &mut nodes {
-            node.inc.sort();
-            node.out.sort();
-        }
+        for inc in &mut incoming { inc.sort(); }
+        for out in &mut outgoing { out.sort(); }
 
         FlowGraph {
             nodes,
             blocks: self.blocks,
             edges: self.edges,
+            incoming,
+            outgoing,
         }
     }
 
     /// Parse the basic block at the beginning of the given binary code.
-    fn parse_block(&mut self, node: NodeContext, state: &mut SymState) -> Option<Exit> {
+    fn parse_block(&mut self, node: FlowNode, state: &mut SymState) -> Option<Exit> {
         let mut parser = if let Some(block) = self.blocks.get(&node.addr) {
             BlockParser::from_block(block)
         } else {
@@ -320,8 +311,8 @@ impl<'a> FlowConstructor<'a> {
     /// of the just parsed block.
     fn explore_exit(
         &mut self,
-        node: NodeContext,
-        path: &[NodeContext],
+        node: FlowNode,
+        path: &[FlowNode],
         exit: Exit,
         state: SymState
     ) {
@@ -364,8 +355,8 @@ impl<'a> FlowConstructor<'a> {
         jumpsite: u64,
         kind: ExitKind,
         condition: (JumpCondition, bool),
-        node: NodeContext,
-        path: &[NodeContext],
+        node: FlowNode,
+        path: &[FlowNode],
         state: &SymState
     ) {
         // Check if we are already recursing.
@@ -375,7 +366,7 @@ impl<'a> FlowConstructor<'a> {
             .filter(|&&jump| jump == (jumpsite, addr)).count() >= 2;
 
         // Assemble the new ID.
-        let mut target_node = NodeContext {
+        let mut target_node = FlowNode {
             addr,
             trace: node.trace.clone(),
         };
@@ -411,8 +402,8 @@ impl<'a> FlowConstructor<'a> {
 /// Either reuses an existing block or parses a block from binary.
 #[derive(Debug, Clone)]
 enum BlockParser<'a> {
-    Block {
-        block: &'a Block,
+    BasicBlock {
+        block: &'a BasicBlock,
         index: usize,
     },
     Binary {
@@ -426,8 +417,8 @@ enum BlockParser<'a> {
 
 impl<'a> BlockParser<'a> {
     /// Create a new block parser from an existing block.
-    fn from_block(block: &'a Block) -> BlockParser {
-        BlockParser::Block {
+    fn from_block(block: &'a BasicBlock) -> BlockParser {
+        BlockParser::BasicBlock {
             block,
             index: 0,
         }
@@ -447,7 +438,7 @@ impl<'a> BlockParser<'a> {
     /// Retrieve the next parsed element.
     fn next(&mut self) -> &(u64, u64, Instruction, Microcode) {
         match self {
-            BlockParser::Block { block, index } => {
+            BlockParser::BasicBlock { block, index } => {
                 *index += 1;
                 &block.code[*index - 1]
             },
@@ -466,11 +457,11 @@ impl<'a> BlockParser<'a> {
     }
 
     /// Return the parsed block if this parser actually parsing something.
-    fn export(self) -> Option<Block> {
+    fn export(self) -> Option<BasicBlock> {
         match self {
-            BlockParser::Block { .. } => None,
+            BlockParser::BasicBlock { .. } => None,
             BlockParser::Binary { entry, index, code, .. } => {
-                Some(Block {
+                Some(BasicBlock {
                     addr: entry,
                     len: index,
                     code,
@@ -506,19 +497,22 @@ mod tests {
     use super::*;
 
     fn test(filename: &str) {
+        let path = format!("target/bin/{}", filename);
+
         // Generate the flow graph.
-        let program = Program::new(filename);
+        let program = Program::new(path);
         let graph = FlowGraph::new(&program);
 
         // Visualize the graph into a PDF file.
+        fs::create_dir("target/graphs").ok();
         let flow_temp = "target/temp-flow.gv";
         let flow_file = File::create(flow_temp).unwrap();
-        graph.visualize(flow_file, &program, filename, VisualStyle::Instructions).unwrap();
+        graph.visualize(flow_file, &program, filename, VisualizationStyle::Instructions).unwrap();
         let output = Command::new("dot")
             .arg("-Tpdf")
             .arg(flow_temp)
             .arg("-o")
-            .arg(format!("{}-flow.pdf", filename))
+            .arg(format!("target/graphs/{}.pdf", filename))
             .output()
             .expect("failed to run graphviz");
         io::stdout().write_all(&output.stdout).unwrap();
@@ -528,14 +522,14 @@ mod tests {
 
     #[test]
     fn flow_graph() {
-        test("target/block-1");
-        test("target/case");
-        test("target/twice");
-        test("target/loop");
-        test("target/recursive-1");
-        test("target/recursive-2");
-        test("target/func");
-        test("target/bufs");
+        test("block-1");
+        test("case");
+        test("twice");
+        test("loop");
+        test("recursive-1");
+        test("recursive-2");
+        test("func");
+        test("bufs");
     }
 
     fn test_decycle(left: Vec<&str>, right: Vec<&str>) {

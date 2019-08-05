@@ -2,10 +2,12 @@
 
 use std::fmt::{self, Debug, Display, Formatter};
 use z3::Context as Z3Context;
-use z3::ast::{self, Ast, BV as Z3BitVec, Bool as Z3Bool};
+use z3::ast::{Ast, BV as Z3BitVec, Bool as Z3Bool};
 
-use crate::num::{Integer, DataType, DataType::*};
-use self::{SymExpr::*, SymCondition::*};
+use crate::num::{Integer, DataType};
+use DataType::*;
+use SymExpr::*;
+use SymCondition::*;
 
 
 /// A possibly nested symbolic machine integer expression.
@@ -270,7 +272,7 @@ impl Display for SymExpr {
             Or(a, b) => write!(f, "({} | {})", a, b),
             Not(a) => write!(f, "(!{})", a),
             Cast(x, new, signed) => write!(f, "({} as {}{})", x, new,
-                if *signed { " signed "} else { "" }),
+                if *signed { " signed"} else { "" }),
             AsExpr(c, data_type) => write!(f, "({} as {})", c, data_type),
         }
     }

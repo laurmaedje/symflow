@@ -1,12 +1,15 @@
 //! Symbolic microcode execution.
 
-use std::collections::HashMap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
-use crate::amd64::Register;
-use crate::ir::{MicroOperation, Location, Temporary, JumpCondition, Comparison, MemoryMapped};
-use crate::num::{Integer, DataType, DataType::*};
+
+use crate::x86_64::{Register, Operand};
+use crate::ir::{MicroOperation, Location, Temporary, MemoryMapped};
+use crate::ir::{JumpCondition, FlaggedOperation};
+use crate::num::{Integer, DataType};
 use crate::expr::{SymExpr, SymCondition, Symbol};
+use DataType::*;
 
 
 /// The symbolic execution state.
@@ -31,15 +34,7 @@ impl SymState {
 
         self.set_reg(Register::RIP, SymExpr::Int(Integer::from_ptr(addr)));
         match operation {
-            Op::Mov { dest, src } => {
-                self.do_move(dest, src);
-
-                if let Some(address) = self.address_of(dest) {
-                    return Some(Event::MemoryAccess { address, writing: true });
-                } else if let Some(address) = self.address_of(src) {
-                    return Some(Event::MemoryAccess { address, writing: true });
-                }
-            },
+            Op::Mov { dest, src } => self.do_move(dest, src),
 
             Op::Const { dest, constant } => self.set_temp(dest, SymExpr::Int(constant)),
             Op::Cast { target, new, signed } => {
@@ -78,6 +73,73 @@ impl SymState {
         }
 
         None
+    }
+
+    /// Retrieve data from a location.
+    pub fn read_location(&self, src: Location) -> SymExpr {
+        match src {
+            Location::Temp(temp) => self.get_temp(temp),
+            Location::Direct(data_type, space, addr) => {
+                self.memory[space].read_direct(addr, data_type)
+            },
+            Location::Indirect(data_type, space, temp) => {
+                let addr = self.get_temp(temp);
+                assert_eq!(addr.data_type(), N64, "read_location: address has to be 64-bit");
+                self.memory[space].read_expr(addr, data_type)
+            }
+        }
+    }
+
+    /// Write data to a location.
+    pub fn write_location(&mut self, dest: Location, value: SymExpr) {
+        assert_eq!(dest.data_type(), value.data_type(),
+            "write_location: incompatible data types for write");
+
+        match dest {
+            Location::Temp(temp) => self.set_temp(temp, value),
+            Location::Direct(_, space, addr) => {
+                self.memory[space].write_direct(addr, value);
+            },
+            Location::Indirect(_, space, temp) => {
+                let addr = self.get_temp(temp);
+                assert_eq!(addr.data_type(), N64, "write_location: address has to be 64-bit");
+                self.memory[space].write_expr(addr, value);
+            }
+        }
+    }
+
+    /// Return the address expression of the operand if it is a memory access.
+    pub fn get_addr_for_operand(&self, operand: Operand) -> Option<SymExpr> {
+        match operand {
+            Operand::Indirect(_, reg) => Some(self.get_reg(reg)),
+            Operand::IndirectDisplaced(_, reg, offset) => {
+                Some(self.get_reg(reg).add(SymExpr::Int(Integer::from_ptr(offset as u64))))
+            },
+            _ => None,
+        }
+    }
+
+    /// Return the integer stored in the temporary.
+    pub fn get_temp(&self, temp: Temporary) -> SymExpr {
+        let expr = self.temporaries[&temp.1].clone();
+        assert_eq!(temp.0, expr.data_type(), "get_temp: incompatible data types");
+        expr
+    }
+
+    /// Set the temporary to a new value.
+    pub fn set_temp(&mut self, temp: Temporary, value: SymExpr) {
+        assert_eq!(temp.0, value.data_type(), "set_temp: incompatible data types");
+        self.temporaries.insert(temp.1, value);
+    }
+
+    /// Get a value from a register.
+    pub fn get_reg(&self, reg: Register) -> SymExpr {
+        self.memory[1].read_direct(reg.address(), reg.data_type())
+    }
+
+    /// Set a register to a value.
+    pub fn set_reg(&mut self, reg: Register, value: SymExpr) {
+        self.memory[1].write_direct(reg.address(), value);
     }
 
     /// Do a binary operation.
@@ -126,86 +188,22 @@ impl SymState {
     /// Evaulate a condition.
     fn evaluate(&self, condition: JumpCondition) -> SymCondition {
         use JumpCondition::*;
-        use Comparison as Cmp;
+        use FlaggedOperation as Op;
+
         match condition {
             True => SymCondition::Bool(true),
 
-            Equal(Cmp::Sub(a, b)) => self.get_temp(a).equal(self.get_temp(b)),
-            Less(Cmp::Sub(a, b)) => self.get_temp(a).less(self.get_temp(b)),
-            LessEqual(Cmp::Sub(a, b)) => self.get_temp(a).less_equal(self.get_temp(b)),
-            Greater(Cmp::Sub(a, b)) => self.get_temp(a).greater(self.get_temp(b)),
-            GreaterEqual(Cmp::Sub(a, b)) => self.get_temp(a).greater_equal(self.get_temp(b)),
+            Equal(Op::Sub { a, b }) => self.get_temp(a).equal(self.get_temp(b)),
+            Less(Op::Sub { a, b }) => self.get_temp(a).less(self.get_temp(b)),
+            LessEqual(Op::Sub { a, b }) => self.get_temp(a).less_equal(self.get_temp(b)),
+            Greater(Op::Sub { a, b }) => self.get_temp(a).greater(self.get_temp(b)),
+            GreaterEqual(Op::Sub { a, b }) => self.get_temp(a).greater_equal(self.get_temp(b)),
 
-            Equal(Cmp::And(a, b)) => self.get_temp(a).and(self.get_temp(b))
+            Equal(Op::And { a, b }) => self.get_temp(a).and(self.get_temp(b))
                 .equal(SymExpr::Int(Integer(a.0, 0))),
 
             _ => panic!("evaluate: unhandled condition/comparison pair"),
         }
-    }
-
-    /// Retrieve data from a location.
-    fn read_location(&self, src: Location) -> SymExpr {
-        match src {
-            Location::Temp(temp) => self.get_temp(temp),
-            Location::Direct(data_type, space, addr) => {
-                self.memory[space].read_direct(addr, data_type)
-            },
-            Location::Indirect(data_type, space, temp) => {
-                let addr = self.get_temp(temp);
-                assert_eq!(addr.data_type(), N64, "read_location: address has to be 64-bit");
-                self.memory[space].read_expr(addr, data_type)
-            }
-        }
-    }
-
-    /// Write data to a location.
-    fn write_location(&mut self, dest: Location, value: SymExpr) {
-        assert_eq!(dest.data_type(), value.data_type(),
-            "write_location: incompatible data types for write");
-
-        match dest {
-            Location::Temp(temp) => self.set_temp(temp, value),
-            Location::Direct(_, space, addr) => {
-                self.memory[space].write_direct(addr, value);
-            },
-            Location::Indirect(_, space, temp) => {
-                let addr = self.get_temp(temp);
-                assert_eq!(addr.data_type(), N64, "write_location: address has to be 64-bit");
-                self.memory[space].write_expr(addr, value);
-            }
-        }
-    }
-
-    /// The address in main memory corresponding to this location.
-    fn address_of(&self, location: Location) -> Option<SymExpr> {
-        match location {
-            Location::Direct(_, 0, addr) => Some(SymExpr::Int(Integer::from_ptr(addr))),
-            Location::Indirect(_, 0, temp) => Some(self.get_temp(temp)),
-            _ => None,
-        }
-    }
-
-    /// Return the integer stored in the temporary.
-    fn get_temp(&self, temp: Temporary) -> SymExpr {
-        let expr = self.temporaries[&temp.1].clone();
-        assert_eq!(temp.0, expr.data_type(), "get_temp: incompatible data types");
-        expr
-    }
-
-    /// Set the temporary to a new value.
-    fn set_temp(&mut self, temp: Temporary, value: SymExpr) {
-        assert_eq!(temp.0, value.data_type(), "set_temp: incompatible data types");
-        self.temporaries.insert(temp.1, value);
-    }
-
-    /// Get a value from a register.
-    fn get_reg(&self, reg: Register) -> SymExpr {
-        self.memory[1].read_direct(reg.address(), reg.data_type())
-    }
-
-    /// Set a register to a value.
-    fn set_reg(&mut self, reg: Register, value: SymExpr) {
-        self.memory[1].write_direct(reg.address(), value);
     }
 }
 
@@ -213,7 +211,6 @@ impl SymState {
 #[derive(Debug, Clone)]
 pub enum Event {
     Jump { target: SymExpr, condition: JumpCondition, relative: bool },
-    MemoryAccess { address: SymExpr, writing: bool },
     Exit,
 }
 

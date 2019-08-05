@@ -1,10 +1,10 @@
 //! Parsing of the 64-bit `ELF` file format.
 
-use std::path::Path;
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::ffi::CStr;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::fs::File;
-use std::ffi::CStr;
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::path::Path;
 use byteorder::{ReadBytesExt, LE};
 
 

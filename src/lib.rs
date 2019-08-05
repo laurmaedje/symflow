@@ -1,22 +1,24 @@
-//! A machine code slicer 🚀 for the AMD-64 architecture based on symbolic execution.
+//! A machine code flow analyzer 🚀 for the `x86_64` architecture based on symbolic execution.
 
 #![allow(unused)]
 
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 use std::path::Path;
-use crate::elf::ElfFile;
-use crate::amd64::Instruction;
-use crate::ir::{MicroEncoder, Microcode};
 
-pub mod amd64;
+use crate::elf::ElfFile;
+use crate::x86_64::Instruction;
+use crate::ir::{Microcode, MicroEncoder};
+
 pub mod elf;
+pub mod x86_64;
 pub mod ir;
-pub mod flow;
-pub mod slice;
-pub mod sym;
-pub mod expr;
 pub mod num;
+pub mod expr;
+pub mod sym;
+pub mod control_flow;
+pub mod data_flow;
+
 
 
 /// A decoded binary file.
@@ -69,6 +71,13 @@ impl Program {
             symbols
         }
     }
+
+    /// Get the instruction at the given address.
+    pub fn get_instruction(&self, addr: u64) -> Option<&Instruction> {
+        self.code.iter()
+            .find(|entry| entry.0 == addr)
+            .map(|entry| &entry.2)
+    }
 }
 
 impl Display for Program {
@@ -101,18 +110,19 @@ mod tests {
 
     #[test]
     fn program() {
-        // load_program("target/block-1");
-        // load_program("target/block-2");
-        // load_program("target/case");
-        // load_program("target/twice");
-        // load_program("target/loop");
-        // load_program("target/recursive-1");
-        // load_program("target/recursive-2");
-        // load_program("target/func");
-        load_program("target/bufs");
+        load_program("block-1");
+        load_program("block-2");
+        load_program("case");
+        load_program("twice");
+        load_program("loop");
+        load_program("recursive-1");
+        load_program("recursive-2");
+        load_program("func");
+        load_program("bufs");
     }
 
     fn load_program(filename: &str) {
-        println!("{}: {:#}\n", filename, Program::new(filename));
+        let path = format!("target/bin/{}", filename);
+        println!("{}: {:#}\n", filename, Program::new(path));
     }
 }

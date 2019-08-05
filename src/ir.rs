@@ -1,8 +1,9 @@
 //! Microcode encoding of instructions.
 
 use std::fmt::{self, Debug, Display, Formatter};
-use crate::amd64::{Instruction, Mnemoic, Operand, Register};
-use crate::num::{DataType, Integer};
+
+use crate::x86_64::{Instruction, Mnemoic, Operand, Register};
+use crate::num::{Integer, DataType};
 
 
 /// A sequence of micro operations.
@@ -55,18 +56,17 @@ pub enum MicroOperation {
 pub struct MicroEncoder {
     ops: Vec<MicroOperation>,
     temps: usize,
-    last_comparison: Option<Comparison>,
+    last_flag_op: Option<FlaggedOperation>,
 }
 
 type EncoderResult<T> = Result<T, String>;
-
 impl MicroEncoder {
     /// Create a new encoder.
     pub fn new() -> MicroEncoder {
         MicroEncoder {
             ops: vec![],
             temps: 0,
-            last_comparison: None
+            last_flag_op: None
         }
     }
 
@@ -84,16 +84,16 @@ impl MicroEncoder {
         match inst.mnemoic {
             // Load both operands, perform an operation and write the result back.
             Add => {
-                let (left, right) = self.encode_binop(inst, |sum, a, b| Op::Add { sum, a, b });
-                self.last_comparison = Some(Comparison::Add(left, right));
+                let (a, b) = self.encode_binop(inst, |sum, a, b| Op::Add { sum, a, b });
+                self.last_flag_op = Some(FlaggedOperation::Add { a, b });
             },
             Sub => {
-                let (left, right) = self.encode_binop(inst, |diff, a, b| Op::Sub { diff, a, b });
-                self.last_comparison = Some(Comparison::Sub(left, right));
+                let (a, b) = self.encode_binop(inst, |diff, a, b| Op::Sub { diff, a, b });
+                self.last_flag_op = Some(FlaggedOperation::Sub { a, b });
             },
             Imul => {
-                let (left, right) = self.encode_binop(inst, |prod, a, b| Op::Mul { prod, a, b });
-                self.last_comparison = Some(Comparison::Mul(left, right));
+                let (a, b) = self.encode_binop(inst, |prod, a, b| Op::Mul { prod, a, b });
+                self.last_flag_op = Some(FlaggedOperation::Mul { a, b });
             },
 
             // Retrieve both locations and move from source to destination.
@@ -169,12 +169,12 @@ impl MicroEncoder {
             },
 
             Cmp => {
-                let ((_, left), (_, right)) = self.encode_load_both(inst);
-                self.last_comparison = Some(Comparison::Sub(left, right));
+                let ((_, a), (_, b)) = self.encode_load_both(inst);
+                self.last_flag_op = Some(FlaggedOperation::Sub { a, b });
             }
             Test => {
-                let ((_, left), (_, right)) = self.encode_load_both(inst);
-                self.last_comparison = Some(Comparison::And(left, right));
+                let ((_, a), (_, b)) = self.encode_load_both(inst);
+                self.last_flag_op = Some(FlaggedOperation::And { a, b });
             }
             Setl => self.encode_comp_set(inst, JumpCondition::Less)?,
 
@@ -215,8 +215,8 @@ impl MicroEncoder {
 
     /// Encode a jump from the last comparison.
     fn encode_comp_jump<F>(&mut self, inst: &Instruction, comp: F) -> EncoderResult<()>
-    where F: FnOnce(Comparison) -> JumpCondition {
-        Ok(self.encode_jump(inst, comp(self.get_comparison()?)))
+    where F: FnOnce(FlaggedOperation) -> JumpCondition {
+        Ok(self.encode_jump(inst, comp(self.get_last_flag_op()?)))
     }
 
     /// Encode a set instruction, which sets a bit based on a condition.
@@ -230,8 +230,8 @@ impl MicroEncoder {
 
     /// Encode a set from the last comparison.
     fn encode_comp_set<F>(&mut self, inst: &Instruction, comp: F) -> EncoderResult<()>
-    where F: FnOnce(Comparison) -> JumpCondition {
-        self.encode_set(inst, comp(self.get_comparison()?))
+    where F: FnOnce(FlaggedOperation) -> JumpCondition {
+        self.encode_set(inst, comp(self.get_last_flag_op()?))
     }
 
     /// Encode a push instruction.
@@ -396,11 +396,11 @@ impl MicroEncoder {
         Ok(self.ops.push(MicroOperation::Mov { dest, src }))
     }
 
-    /// Get the comparison which matches the last instruction modifying the flags.
-    fn get_comparison(&self) -> EncoderResult<Comparison> {
-        match self.last_comparison {
+    /// Get the flagged operation which matches the last instruction modifying the flags.
+    fn get_last_flag_op(&self) -> EncoderResult<FlaggedOperation> {
+        match self.last_flag_op {
             Some(cmp) => Ok(cmp),
-            None => Err("get_comparison: no previous comparison".to_string()),
+            None => Err("get_comparison: no previous flag-modifying operation".to_string()),
         }
     }
 }
@@ -488,50 +488,60 @@ impl Display for Temporary {
     }
 }
 
-/// JumpCondition for jumps and sets.
+/// The condition for jumps and sets.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum JumpCondition {
+    /// Jump always.
     True,
-    Equal(Comparison),
-    Less(Comparison),
-    LessEqual(Comparison),
-    Greater(Comparison),
-    GreaterEqual(Comparison),
+    /// Jump if equal (zero flag = 1).
+    Equal(FlaggedOperation),
+    /// Jump if less (sign flag ≠ overflow flag).
+    Less(FlaggedOperation),
+    /// Jump if less or equal (zero flag = 1 or sign flag ≠ overflow flag).
+    LessEqual(FlaggedOperation),
+    /// Jump if greater (zero flag = 0 and sign flag = overflow flag).
+    Greater(FlaggedOperation),
+    /// Jump if greater or equal (sign flag = overflow flag).
+    GreaterEqual(FlaggedOperation),
 }
 
-/// The comparison type for a condition.
+/// An operation which would modify the flag registers.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub enum Comparison {
-    Add(Temporary, Temporary),
-    Sub(Temporary, Temporary),
-    Mul(Temporary, Temporary),
-    And(Temporary, Temporary),
+pub enum FlaggedOperation {
+    Add { a: Temporary, b: Temporary },
+    Sub { a: Temporary, b: Temporary },
+    Mul { a: Temporary, b: Temporary },
+    And { a: Temporary, b: Temporary },
 }
 
 impl JumpCondition {
     /// Return a more readable version of the condition.
+    ///
+    /// If `value` is `true` the string represents the condition being fulfilled
+    /// and otherwise the inverse.
     pub fn pretty_format(&self, value: bool) -> String {
         use JumpCondition::*;
-        use Comparison::*;
+        use FlaggedOperation::*;
+
         match (self, value) {
             (True, true) => "True".to_string(),
             (True, false) => "False".to_string(),
 
-            (Equal(Sub(a, b)), true) => format!("T{} = T{}", a.1, b.1),
-            (Equal(Sub(a, b)), false) => format!("T{} != T{}", a.1, b.1),
-            (Less(Sub(a, b)), true) | (GreaterEqual(Sub(a, b)), false)
+            (Equal(Sub { a, b }), true) => format!("T{} = T{}", a.1, b.1),
+            (Equal(Sub { a, b }), false) => format!("T{} != T{}", a.1, b.1),
+            (Less(Sub { a, b }), true) | (GreaterEqual(Sub { a, b }), false)
                 => format!("T{} < T{}", a.1, b.1),
-            (LessEqual(Sub(a, b)), true) | (Greater(Sub(a, b)), false)
+            (LessEqual(Sub { a, b }), true) | (Greater(Sub { a, b }), false)
                 => format!("T{} <= T{}", a.1, b.1),
-            (Greater(Sub(a, b)), true) | (LessEqual(Sub(a, b)), false)
+            (Greater(Sub { a, b }), true) | (LessEqual(Sub { a, b }), false)
                 => format!("T{} > T{}", a.1, b.1),
-            (GreaterEqual(Sub(a, b)), true) | (Less(Sub(a, b)), false)
+            (GreaterEqual(Sub { a, b }), true) | (Less(Sub { a, b }), false)
                 => format!("T{} >= T{}", a.1, b.1),
 
-            (Equal(And(a, b)), true) => format!("T{} & T{} = 0", a.1, b.1),
-            (Equal(And(a, b)), false) => format!("T{} & T{} != 0", a.1, b.1),
+            (Equal(And { a, b }), true) => format!("T{} & T{} = 0", a.1, b.1),
+            (Equal(And { a, b }), false) => format!("T{} & T{} != 0", a.1, b.1),
 
-            _ => panic!("pretty_format: unhandled condition/comparison/value triple"),
+            _ => panic!("pretty_format: unhandled condition/operation/value triple"),
         }
     }
 }
@@ -549,13 +559,13 @@ impl Display for JumpCondition {
     }
 }
 
-impl Display for Comparison {
+impl Display for FlaggedOperation {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            Comparison::Add(a, b) => write!(f, "{} + {}", a, b),
-            Comparison::Sub(a, b) => write!(f, "{} - {}", a, b),
-            Comparison::Mul(a, b) => write!(f, "{} * {}", a, b),
-            Comparison::And(a, b) => write!(f, "{} & {}", a, b),
+            FlaggedOperation::Add { a, b } => write!(f, "{} + {}", a, b),
+            FlaggedOperation::Sub { a, b } => write!(f, "{} - {}", a, b),
+            FlaggedOperation::Mul { a, b } => write!(f, "{} * {}", a, b),
+            FlaggedOperation::And { a, b } => write!(f, "{} & {}", a, b),
         }
     }
 }
@@ -623,7 +633,7 @@ impl Debug for EncodingError {
 
 #[cfg(test)]
 mod tests {
-    use crate::amd64::*;
+    use crate::x86_64::*;
     use super::*;
 
     fn test(bytes: &[u8], display: &str) {

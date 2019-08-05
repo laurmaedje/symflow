@@ -1,9 +1,10 @@
-//! Machine numerics.
+//! Integers with machine semantics.
 
+use std::cmp::{Ord, PartialOrd, Eq, PartialEq, Ordering};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{Add, Sub, Mul, BitAnd, BitOr, Not};
-use std::cmp::{Ord, PartialOrd, Eq, PartialEq, Ordering};
 use byteorder::{ByteOrder, LittleEndian};
+
 use DataType::*;
 
 
