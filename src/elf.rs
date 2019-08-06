@@ -261,9 +261,9 @@ impl std::error::Error for ElfError {
 impl Display for ElfError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
-            ElfError::Invalid => write!(f, "invalid elf file"),
-            ElfError::MissingSection(name) => write!(f, "missing section: {}", name),
-            ElfError::Io(err) => write!(f, "i/o-error: {}", err),
+            ElfError::Invalid => write!(f, "Invalid ELF file"),
+            ElfError::MissingSection(name) => write!(f, "Missing section: {}", name),
+            ElfError::Io(err) => write!(f, "I/O error: {}", err),
         }
     }
 }

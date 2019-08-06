@@ -22,7 +22,7 @@ pub mod data_flow;
 
 
 /// A decoded binary file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Program {
     pub base: u64,
     pub entry: u64,
@@ -84,21 +84,16 @@ impl Display for Program {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "Program [")?;
         if !self.code.is_empty() { writeln!(f)?; }
-
         let mut first = true;
         for (addr, _, instruction, microcode) in &self.code {
             if f.alternate() && !first { writeln!(f)?; } first = false;
             writeln!(f, "    {:x}: {}", addr, instruction)?;
-
             if f.alternate() {
-                for line in microcode.to_string().lines() {
-                    if !line.starts_with("Microcode") && line != "]" {
-                        writeln!(f, "         | {}", &line[4..])?;
-                    }
+                for &op in &microcode.ops {
+                    writeln!(f, "         | {}", op)?;
                 }
             }
         }
-
         write!(f, "]")
     }
 }
@@ -110,14 +105,14 @@ mod tests {
 
     #[test]
     fn program() {
-        load_program("block-1");
-        load_program("block-2");
-        load_program("case");
-        load_program("twice");
-        load_program("loop");
-        load_program("recursive-1");
-        load_program("recursive-2");
-        load_program("func");
+        // load_program("block-1");
+        // load_program("block-2");
+        // load_program("case");
+        // load_program("twice");
+        // load_program("loop");
+        // load_program("recursive-1");
+        // load_program("recursive-2");
+        // load_program("func");
         load_program("bufs");
     }
 

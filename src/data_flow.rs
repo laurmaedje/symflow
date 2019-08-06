@@ -7,7 +7,7 @@ use z3::ast::{Ast, Set as Z3Set};
 use crate::ir::Location;
 use crate::num::{Integer, DataType};
 use crate::expr::{SymExpr, SymCondition, Symbol};
-use crate::sym::{SymState, TypedMemoryAccess};
+use crate::sym::{SymState, SymbolMap, TypedMemoryAccess};
 use crate::control_flow::FlowGraph;
 use DataType::*;
 
@@ -46,6 +46,8 @@ impl<'g> DataflowExplorer<'g> {
             let node = &self.graph.nodes[target];
             let block = &self.graph.blocks[&node.addr];
 
+            state.trace(node.addr);
+
             // Simulate a basic block.
             for (addr, len, _instruction, microcode) in &block.code {
                 let addr = *addr;
@@ -64,7 +66,13 @@ impl<'g> DataflowExplorer<'g> {
                         } else {
                             SymCondition::Bool(false)
                         };
-                        map.insert(addr, condition);
+
+                        let symbols = state.symbol_map.iter()
+                            .filter(|&(symbol, _)| condition.contains_symbol(*symbol))
+                            .map(|(&sym, loc)| (sym, loc.clone()))
+                            .collect();
+
+                        map.insert(addr, (condition, symbols));
                     }
                 }
 
@@ -167,9 +175,9 @@ impl<'g> DataflowExplorer<'g> {
 
 /// Maps all data flow targets to the conditions under which data flows from the main
 /// target into them.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct DataFlowMap {
-    pub map: HashMap<u64, SymCondition>,
+    pub map: HashMap<u64, (SymCondition, SymbolMap)>,
 }
 
 impl Display for DataFlowMap {
@@ -178,8 +186,16 @@ impl Display for DataFlowMap {
         if !self.map.is_empty() { writeln!(f)?; }
         let mut map: Vec<_> = self.map.iter().collect();
         map.sort_by_key(|pair| pair.0);
-        for (addr, condition) in map {
+        for (addr, (condition, symbols)) in map {
             writeln!(f, "    {:x}: {}", addr, condition)?;
+            if !symbols.is_empty() {
+                let mut symbols: Vec<_> = symbols.iter().collect();
+                symbols.sort_by_key(|pair| pair.0);
+                writeln!(f, "         where ")?;
+                for (symbol, location) in symbols {
+                    writeln!(f, "             {} is {}", symbol, location)?;
+                }
+            }
         }
         writeln!(f, "]")
     }

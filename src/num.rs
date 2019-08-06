@@ -12,31 +12,40 @@ use DataType::*;
 #[derive(Debug, Copy, Clone, Hash)]
 pub struct Integer(pub DataType, pub u64);
 
+/// Different width numeric types.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum DataType {
+    N8,
+    N16,
+    N32,
+    N64,
+}
+
 /// Replicates code for all types.
 macro_rules! typed {
-($caster:ident => $data_type:expr, $signed:expr, $code:block) => {
-    match ($data_type, $signed) {
-        (N8 , false) => { let $caster = |n| n as u8; $code  }
-        (N16, false) => { let $caster = |n| n as u16; $code }
-        (N32, false) => { let $caster = |n| n as u32; $code }
-        (N64, false) => { let $caster = |n| n as u64; $code }
-        (N8 , true)  => { let $caster = |n| n as i8; $code  }
-        (N16, true)  => { let $caster = |n| n as i16; $code }
-        (N32, true)  => { let $caster = |n| n as i32; $code }
-        (N64, true)  => { let $caster = |n| n as i64; $code }
-    }
-};
+    ($caster:ident => $data_type:expr, $signed:expr, $code:block) => {
+        match ($data_type, $signed) {
+            (N8 , false) => { let $caster = |n| n as u8; $code  }
+            (N16, false) => { let $caster = |n| n as u16; $code }
+            (N32, false) => { let $caster = |n| n as u32; $code }
+            (N64, false) => { let $caster = |n| n as u64; $code }
+            (N8 , true)  => { let $caster = |n| n as i8; $code  }
+            (N16, true)  => { let $caster = |n| n as i16; $code }
+            (N32, true)  => { let $caster = |n| n as i32; $code }
+            (N64, true)  => { let $caster = |n| n as i64; $code }
+        }
+    };
 }
 
 /// Default arithmetic flags.
 macro_rules! flags {
-($target:expr) => {
-    Flags {
-        zero: $target == 0,
-        sign: $target.leading_zeros() == 0,
-        overflow: false,
-    }
-};
+    ($target:expr) => {
+        Flags {
+            zero: $target == 0,
+            sign: $target.leading_zeros() == 0,
+            overflow: false,
+        }
+    };
 }
 
 /// Make sure operations only happen on same integers.
@@ -46,17 +55,17 @@ fn check_compatible(a: DataType, b: DataType, operation: &str) {
 
 /// Arithmetic operation with flags.
 macro_rules! flagged {
-($name:ident, $target:ident, $a:ident, $b:ident => $op:ident, $flags:expr) => {
-    pub fn $name(self, other: Integer) -> (Integer, Flags) {
-        check_compatible(self.0, other.0, "operation");
-        typed!(cast => self.0, true, {
-            let $a = cast(self.1);
-            let $b = cast(other.1);
-            let $target = $a.$op($b);
-            (Integer(self.0, $target as u64), $flags)
-        })
-    }
-};
+    ($name:ident, $target:ident, $a:ident, $b:ident => $op:ident, $flags:expr) => {
+        pub fn $name(self, other: Integer) -> (Integer, Flags) {
+            check_compatible(self.0, other.0, "operation");
+            typed!(cast => self.0, true, {
+                let $a = cast(self.1);
+                let $b = cast(other.1);
+                let $target = $a.$op($b);
+                (Integer(self.0, $target as u64), $flags)
+            })
+        }
+    };
 }
 
 impl Integer {
@@ -126,18 +135,18 @@ impl Display for Integer {
 }
 
 macro_rules! binary_operation {
-($trait:ident, $func:ident, $op:tt) => {
-    impl $trait for Integer {
-        type Output = Integer;
+    ($trait:ident, $func:ident, $op:tt) => {
+        impl $trait for Integer {
+            type Output = Integer;
 
-        fn $func(self, other: Integer) -> Integer {
-            check_compatible(self.0, other.0, "operation");
-            Integer(self.0, typed!(cast => self.0, false, {
-                (cast(self.1).$op(cast(other.1))) as u64
-            }))
+            fn $func(self, other: Integer) -> Integer {
+                check_compatible(self.0, other.0, "operation");
+                Integer(self.0, typed!(cast => self.0, false, {
+                    (cast(self.1).$op(cast(other.1))) as u64
+                }))
+            }
         }
-    }
-};
+    };
 }
 
 binary_operation!(Add, add, wrapping_add);
@@ -177,15 +186,6 @@ impl Not for Integer {
     }
 }
 
-/// Different width numeric types.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub enum DataType {
-    N8,
-    N16,
-    N32,
-    N64,
-}
-
 impl DataType {
     /// Word representation of the data type.
     pub fn name(&self) -> &'static str {
@@ -215,12 +215,17 @@ impl DataType {
 
 impl Display for DataType {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}", format!("{:?}", self).to_lowercase())
+        write!(f, "{}", match self {
+            N8 => "n8",
+            N16 => "n16",
+            N32 => "n32",
+            N64 => "n64",
+        })
     }
 }
 
 /// Arithemtic operation flags returned by some functions on integers.
-#[derive(Debug, Default, Copy, Clone, PartialEq)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub struct Flags {
     pub zero: bool,
     pub sign: bool,

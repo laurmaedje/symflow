@@ -41,7 +41,7 @@ pub enum SymCondition {
 }
 
 /// A symbol value identified by an index.
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Symbol(pub DataType, pub usize, pub usize);
 
 /// Make sure operations only happen on same expressions.
@@ -95,20 +95,26 @@ macro_rules! cmp_expr {
     };
 }
 
+macro_rules! contains {
+    ($symbol:expr, $($exprs:expr),*) => {
+        $($exprs.contains_symbol($symbol) ||)* false
+    };
+}
+
 impl SymExpr {
     /// The data type of the expression if it is an integer type.
     pub fn data_type(&self) -> DataType {
         match self {
             Int(int) => int.0,
             Sym(sym) => sym.0,
-            Add(a, _) => a.data_type(),
-            Sub(a, _) => a.data_type(),
-            Mul(a, _) => a.data_type(),
+            Add(a, _)    => a.data_type(),
+            Sub(a, _)    => a.data_type(),
+            Mul(a, _)    => a.data_type(),
             BitAnd(a, _) => a.data_type(),
-            BitOr(a, _) => a.data_type(),
-            BitNot(a) => a.data_type(),
+            BitOr(a, _)  => a.data_type(),
+            BitNot(a)    => a.data_type(),
             Cast(_, new, _) => *new,
-            AsExpr(_, new) => *new,
+            AsExpr(_, new)  => *new,
         }
     }
 
@@ -186,6 +192,22 @@ impl SymExpr {
     cmp_expr!(less_equal, le, LessEqual);
     cmp_expr!(greater, gt, Greater);
     cmp_expr!(greater_equal, ge, GreaterEqual);
+
+    /// Whether the given symbol appears somewhere in this tree.
+    pub fn contains_symbol(&self, symbol: Symbol) -> bool {
+        match self {
+            Int(int) => false,
+            Sym(sym) => *sym == symbol,
+            Add(a, b)    => contains!(symbol, a, b),
+            Sub(a, b)    => contains!(symbol, a, b),
+            Mul(a, b)    => contains!(symbol, a, b),
+            BitAnd(a, b) => contains!(symbol, a, b),
+            BitOr(a, b)  => contains!(symbol, a, b),
+            BitNot(a)    => contains!(symbol, a),
+            Cast(a, _, _) => contains!(symbol, a),
+            AsExpr(a, _)  => contains!(symbol, a),
+        }
+    }
 
     /// Convert the Z3-solver Ast into an expression if possible.
     pub fn from_z3_ast(ast: &Z3BitVec) -> Result<SymExpr, FromAstError> {
@@ -267,6 +289,21 @@ impl SymCondition {
         }
     }
 
+    /// Whether the given symbol appears somewhere in this tree.
+    pub fn contains_symbol(&self, symbol: Symbol) -> bool {
+        match self {
+            Bool(b) => false,
+            Equal(a, b)        => contains!(symbol, a, b),
+            Less(a, b)         => contains!(symbol, a, b),
+            LessEqual(a, b)    => contains!(symbol, a, b),
+            Greater(a, b)      => contains!(symbol, a, b),
+            GreaterEqual(a, b) => contains!(symbol, a, b),
+            And(a, b) => contains!(symbol, a, b),
+            Or(a, b)  => contains!(symbol, a, b),
+            Not(a)    => contains!(symbol, a),
+        }
+    }
+
     /// Convert the Z3-solver Ast into an expression if possible.
     pub fn from_z3_ast(ast: &Z3Bool) -> Result<SymCondition, FromAstError> {
         let repr = ast.to_string();
@@ -287,8 +324,8 @@ impl SymCondition {
             GreaterEqual(a, b) => z3_binop!(ctx, a, b, bvuge),
 
             And(a, b) => a.to_z3_ast(ctx).and(&[&b.to_z3_ast(ctx)]),
-            Or(a, b) => a.to_z3_ast(ctx).or(&[&b.to_z3_ast(ctx)]),
-            Not(a) => a.to_z3_ast(ctx).not(),
+            Or(a, b)  => a.to_z3_ast(ctx).or(&[&b.to_z3_ast(ctx)]),
+            Not(a)    => a.to_z3_ast(ctx).not(),
         }
     }
 }
@@ -630,21 +667,6 @@ impl<'a> Z3Parser<'a> {
     }
 }
 
-/// A dynamically typed symbolic value.
-#[derive(Debug, Clone)]
-enum SymDynamic {
-    Expr(SymExpr),
-    Condition(SymCondition),
-}
-
-impl From<SymExpr> for SymDynamic {
-    fn from(expr: SymExpr) -> SymDynamic { SymDynamic::Expr(expr) }
-}
-
-impl From<SymCondition> for SymDynamic {
-    fn from(cond: SymCondition) -> SymDynamic { SymDynamic::Condition(cond) }
-}
-
 /// Extend `right` by `bits` bits.
 fn zero_extend(bits: usize, right: SymExpr) -> ParseResult<SymExpr> {
     match bits + right.data_type().bits() {
@@ -663,6 +685,21 @@ fn err<T, S: Into<String>>(message: S) -> ParseResult<T> {
 /// Shorthand for `Box::new`.
 fn boxed<T>(value: T) -> Box<T> {
     Box::new(value)
+}
+
+/// A dynamically typed symbolic value.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+enum SymDynamic {
+    Expr(SymExpr),
+    Condition(SymCondition),
+}
+
+impl From<SymExpr> for SymDynamic {
+    fn from(expr: SymExpr) -> SymDynamic { SymDynamic::Expr(expr) }
+}
+
+impl From<SymCondition> for SymDynamic {
+    fn from(cond: SymCondition) -> SymDynamic { SymDynamic::Condition(cond) }
 }
 
 
@@ -687,7 +724,7 @@ impl FromAstError {
 impl std::error::Error for FromAstError {}
 impl Display for FromAstError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        writeln!(f, "failed to parse Z3 value at index {}: {} [", self.index, self.message)?;
+        writeln!(f, "Failed to parse Z3 value at index {}: {} [", self.index, self.message)?;
         for line in self.ast.lines() {
             writeln!(f, "    {}", line)?;
         }

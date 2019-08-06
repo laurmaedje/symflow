@@ -479,7 +479,7 @@ impl Display for Location {
 }
 
 /// Temporary variable identified by an index.
-#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Temporary(pub DataType, pub usize);
 
 impl Display for Temporary {
@@ -489,7 +489,7 @@ impl Display for Temporary {
 }
 
 /// The condition for jumps and sets.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum JumpCondition {
     /// Jump always.
     True,
@@ -506,7 +506,7 @@ pub enum JumpCondition {
 }
 
 /// An operation which would modify the flag registers.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum FlaggedOperation {
     Add { a: Temporary, b: Temporary },
     Sub { a: Temporary, b: Temporary },
@@ -620,7 +620,7 @@ impl std::error::Error for EncodingError {}
 
 impl Display for EncodingError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "failed to encode instruction <{}>: {}", self.0, self.1)
+        write!(f, "Failed to encode instruction: {} [{}]", self.1, self.0)
     }
 }
 

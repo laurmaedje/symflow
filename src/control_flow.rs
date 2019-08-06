@@ -12,7 +12,7 @@ use crate::sym::{SymState, Event};
 
 
 /// The control flow graph representation of a program.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct FlowGraph {
     /// The nodes of the graph (i.e. basic blocks within a context).
     pub nodes: Vec<FlowNode>,
@@ -156,7 +156,7 @@ pub enum VisualizationStyle {
 struct FlowConstructor<'a> {
     binary: &'a [u8],
     base: u64,
-    stack: Vec<(FlowNode, Vec<FlowNode>, SymState)>,
+    stack: Vec<(FlowNode, Vec<usize>, SymState)>,
     nodes: HashMap<FlowNode, usize>,
     blocks: HashMap<u64, BasicBlock>,
     edges: HashMap<(usize, usize), (JumpCondition, bool)>,
@@ -312,7 +312,7 @@ impl<'a> FlowConstructor<'a> {
     fn explore_exit(
         &mut self,
         node: FlowNode,
-        path: &[FlowNode],
+        path: &[usize],
         exit: Exit,
         state: SymState
     ) {
@@ -356,7 +356,7 @@ impl<'a> FlowConstructor<'a> {
         kind: ExitKind,
         condition: (JumpCondition, bool),
         node: FlowNode,
-        path: &[FlowNode],
+        path: &[usize],
         state: &SymState
     ) {
         // Check if we are already recursing.
@@ -378,9 +378,6 @@ impl<'a> FlowConstructor<'a> {
             _ => {},
         }
 
-        // Only consider the target if it is acyclic or recursing in the allowed limits.
-        let looping = path.contains(&target_node);
-
         // Insert a new edge for the jump.
         let new = self.nodes.len();
         let start = *self.nodes.entry(node.decycled()).or_insert(new);
@@ -388,10 +385,13 @@ impl<'a> FlowConstructor<'a> {
         let end = *self.nodes.entry(target_node.decycled()).or_insert(new);
         self.edges.insert((start, end), condition);
 
+        // Only consider the target if it is acyclic or recursing in the allowed limits.
+        let looping = path.contains(&end);
+
         if !looping && !fully_recursive {
             // Add the current block to the path.
             let mut path = path.to_vec();
-            path.push(node);
+            path.push(start);
 
             // Put the new target on top of the search stack.
             self.stack.push((target_node, path, state.clone()));

@@ -17,6 +17,9 @@ use DataType::*;
 pub struct SymState {
     pub temporaries: HashMap<usize, SymExpr>,
     pub memory: [SymMemory; 2],
+    pub symbol_map: SymbolMap,
+    pub path: Vec<u64>,
+    pub ip: u64,
 }
 
 impl SymState {
@@ -25,6 +28,9 @@ impl SymState {
         SymState {
             temporaries: HashMap::new(),
             memory: [SymMemory::new(0), SymMemory::new(1)],
+            symbol_map: SymbolMap::new(),
+            path: Vec::new(),
+            ip: 0,
         }
     }
 
@@ -33,6 +39,8 @@ impl SymState {
         use MicroOperation as Op;
 
         self.set_reg(Register::RIP, SymExpr::Int(Integer::from_ptr(addr)));
+        self.ip = addr;
+
         match operation {
             Op::Mov { dest, src } => self.do_move(dest, src),
 
@@ -73,6 +81,11 @@ impl SymState {
         }
 
         None
+    }
+
+    /// Add an address to the path of this state.
+    pub fn trace(&mut self, addr: u64) {
+        self.path.push(addr);
     }
 
     /// Retrieve data from a location.
@@ -174,8 +187,16 @@ impl SymState {
 
                 for i in 0 .. byte_count {
                     let target = buf.clone().add(SymExpr::Int(Integer(N64, i)));
-                    let value = SymExpr::Sym(self.memory[0].new_symbol(N8));
+                    let symbol = self.memory[0].new_symbol(N8);
+                    let value = SymExpr::Sym(symbol);
                     self.memory[0].write_expr(target, value);
+
+                    let location = CpuLocation::IndirectMemory(Register::RSI, i as i64);
+                    self.symbol_map.insert(symbol, AbstractLocation {
+                        addr: self.ip,
+                        path: self.path.clone(),
+                        location,
+                    });
                 }
             },
 
@@ -212,7 +233,7 @@ impl SymState {
 }
 
 /// Events occuring during symbolic execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Event {
     Jump { target: SymExpr, condition: JumpCondition, relative: bool },
     Exit,
@@ -300,8 +321,62 @@ impl Display for SymMemory {
     }
 }
 
-/// A typed symbolic memory access.
+/// When and where to find the symbolic values in memory in a real execution.
+pub type SymbolMap = HashMap<Symbol, AbstractLocation>;
+
+/// Identifies a CPU location with an address at which it is valid and a path
+/// that defines the context in which it is valid.
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AbstractLocation {
+    pub addr: u64,
+    pub path: Vec<u64>,
+    pub location: CpuLocation,
+}
+
+/// A location in a real execution.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum CpuLocation {
+    /// A register.
+    Reg(Register),
+    /// An address in main memory.
+    DirectMemory(u64),
+    /// The address stored in the register combined with the offset.
+    IndirectMemory(Register, i64),
+}
+
+impl Display for AbstractLocation {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "{} at {:x} by ", self.location, self.addr)?;
+        let mut first = true;
+        for &addr in &self.path {
+            if !first { write!(f, " -> ")?; } first = false;
+            write!(f, "{:x}", addr)?;
+        }
+        Ok(())
+    }
+}
+
+impl Display for CpuLocation {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        use CpuLocation::*;
+        match self {
+            Reg(reg) => write!(f, "{}", reg),
+            DirectMemory(addr) => write!(f, "[{:#x}]", addr),
+            IndirectMemory(reg, offset) => {
+                write!(f, "[{}", reg)?;
+                if *offset > 0 {
+                    write!(f, "+{:#x}", offset)?
+                } else if *offset < 0 {
+                    write!(f, "-{:#x}", -offset)?
+                }
+                write!(f, "]")
+            }
+        }
+    }
+}
+
+/// A typed symbolic memory access.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct TypedMemoryAccess(pub SymExpr, pub DataType);
 
 impl Display for TypedMemoryAccess {

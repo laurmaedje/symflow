@@ -15,7 +15,7 @@ pub struct Instruction {
 }
 
 /// Identifies an instruction.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Mnemoic {
     Add, Sub, Imul,
     Mov, Movzx, Movsx, Lea,
@@ -313,7 +313,7 @@ fn construct_modrm_rm(rex_b: bool, modus: u8, rm: u8, reg_w: DataType,
 }
 
 /// A REX prefix.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 struct RexPrefix {
     w: bool,
     r: bool,
@@ -374,7 +374,7 @@ impl Display for Operand {
 }
 
 /// Identifies a register.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Register {
     RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI,
     EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI,
@@ -445,7 +445,7 @@ impl std::error::Error for DecodingError {}
 
 impl Display for DecodingError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "failed to decode instruction: {:02x?}", self.0)
+        write!(f, "Failed to decode instruction: {:02x?}", self.0)
     }
 }
 
