@@ -209,7 +209,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn data_flow() {
+    fn flow_map() {
         let program = Program::new("target/bin/bufs");
         let graph = FlowGraph::new(&program);
 
@@ -242,5 +242,21 @@ mod tests {
         });
 
         println!("Data flow: {}", flow_map);
+
+        let secret_flow_condition = &flow_map.map[&0x3c5].0;
+
+        // Ascii 'z' is 122 and ':' is 58, so the difference is exactly 64.
+        // This is the only difference that should satisfy the flow condition.
+        assert!(secret_flow_condition.evaluate_with(|symbol| match symbol {
+            Symbol(N8, 0, 0) => Some(Integer(N8, 'z' as u64)),
+            Symbol(N8, 0, 1) => Some(Integer(N8, ':' as u64)),
+            _ => None,
+        }));
+
+        assert!(!secret_flow_condition.evaluate_with(|symbol| match symbol {
+            Symbol(N8, 0, 0) => Some(Integer(N8, 'a' as u64)),
+            Symbol(N8, 0, 1) => Some(Integer(N8, 'p' as u64)),
+            _ => None,
+        }));
     }
 }

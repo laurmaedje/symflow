@@ -102,7 +102,95 @@ macro_rules! contains {
 }
 
 impl SymExpr {
-    /// The data type of the expression if it is an integer type.
+
+    /// Evaluate the condition with the given values for symbols.
+    pub fn evaluate_with<S>(&self, symbols: S) -> Integer
+    where S: Fn(Symbol) -> Option<Integer> {
+        self.evaluate_inner(&symbols)
+    }
+
+    fn evaluate_inner<S>(&self, symbols: &S) -> Integer
+    where S: Fn(Symbol) -> Option<Integer> {
+        match self {
+            Int(int) => *int,
+            Sym(sym) => symbols(*sym)
+                .unwrap_or_else(|| panic!("evaluate_inner: missing symbol: {}", sym)),
+            Add(a, b)    => a.evaluate_inner(symbols) + b.evaluate_inner(symbols),
+            Sub(a, b)    => a.evaluate_inner(symbols) - b.evaluate_inner(symbols),
+            Mul(a, b)    => a.evaluate_inner(symbols) * b.evaluate_inner(symbols),
+            BitAnd(a, b) => a.evaluate_inner(symbols) & b.evaluate_inner(symbols),
+            BitOr(a, b)  => a.evaluate_inner(symbols) | b.evaluate_inner(symbols),
+            BitNot(a)    => !a.evaluate_inner(symbols),
+            Cast(a, data_type, signed) => a.evaluate_inner(symbols).cast(*data_type, *signed),
+            AsExpr(a, data_type)  => Integer::from_bool(a.evaluate_inner(symbols), *data_type),
+        }
+    }
+
+    /// Whether the given symbol appears somewhere in this tree.
+    pub fn contains_symbol(&self, symbol: Symbol) -> bool {
+        match self {
+            Int(int) => false,
+            Sym(sym) => *sym == symbol,
+            Add(a, b)    => contains!(symbol, a, b),
+            Sub(a, b)    => contains!(symbol, a, b),
+            Mul(a, b)    => contains!(symbol, a, b),
+            BitAnd(a, b) => contains!(symbol, a, b),
+            BitOr(a, b)  => contains!(symbol, a, b),
+            BitNot(a)    => contains!(symbol, a),
+            Cast(a, _, _) => contains!(symbol, a),
+            AsExpr(a, _)  => contains!(symbol, a),
+        }
+    }
+
+    /// Convert the Z3-solver Ast into an expression if possible.
+    pub fn from_z3_ast(ast: &Z3BitVec) -> Result<SymExpr, FromAstError> {
+        let repr = ast.to_string();
+        let mut parser = Z3Parser::new(&repr);
+        parser.parse_bitvec()
+            .map_err(|message| FromAstError::new(ast, parser.index(), message))
+    }
+
+    /// Convert this expression into a Z3-solver Ast.
+    pub fn to_z3_ast<'ctx>(&self, ctx: &'ctx Z3Context) -> Z3BitVec<'ctx> {
+        match self {
+            Int(int) => Z3BitVec::from_u64(ctx, int.1, int.0.bits() as u32),
+            Sym(sym) => Z3BitVec::new_const(ctx, sym.to_string(), sym.0.bits() as u32),
+
+            Add(a, b) => z3_binop!(ctx, a, b, bvadd),
+            Sub(a, b) => z3_binop!(ctx, a, b, bvsub),
+            Mul(a, b) => z3_binop!(ctx, a, b, bvmul),
+            BitAnd(a, b) => z3_binop!(ctx, a, b, bvand),
+            BitOr(a, b)  => z3_binop!(ctx, a, b, bvor),
+            BitNot(a)    => a.to_z3_ast(ctx).bvnot(),
+
+            Cast(x, new, signed) => {
+                let x_ast = x.to_z3_ast(ctx);
+                let src_len = x.data_type().bits() as u32;
+                let dest_len = new.bits() as u32;
+
+                if src_len < dest_len {
+                    let extra_bits = dest_len - src_len;
+                    if *signed {
+                        x_ast.sign_ext(extra_bits)
+                    } else {
+                        x_ast.zero_ext(extra_bits)
+                    }
+                } else if src_len > dest_len {
+                    x_ast.extract(dest_len, 0)
+                } else {
+                    x_ast
+                }
+            },
+            AsExpr(x, new) => {
+                x.to_z3_ast(ctx).ite(
+                    &Z3BitVec::from_u64(ctx, 1, new.bits() as u32),
+                    &Z3BitVec::from_u64(ctx, 0, new.bits() as u32),
+                )
+            }
+        }
+    }
+
+    /// The data type of the expression.
     pub fn data_type(&self) -> DataType {
         match self {
             Int(int) => int.0,
@@ -192,70 +280,6 @@ impl SymExpr {
     cmp_expr!(less_equal, le, LessEqual);
     cmp_expr!(greater, gt, Greater);
     cmp_expr!(greater_equal, ge, GreaterEqual);
-
-    /// Whether the given symbol appears somewhere in this tree.
-    pub fn contains_symbol(&self, symbol: Symbol) -> bool {
-        match self {
-            Int(int) => false,
-            Sym(sym) => *sym == symbol,
-            Add(a, b)    => contains!(symbol, a, b),
-            Sub(a, b)    => contains!(symbol, a, b),
-            Mul(a, b)    => contains!(symbol, a, b),
-            BitAnd(a, b) => contains!(symbol, a, b),
-            BitOr(a, b)  => contains!(symbol, a, b),
-            BitNot(a)    => contains!(symbol, a),
-            Cast(a, _, _) => contains!(symbol, a),
-            AsExpr(a, _)  => contains!(symbol, a),
-        }
-    }
-
-    /// Convert the Z3-solver Ast into an expression if possible.
-    pub fn from_z3_ast(ast: &Z3BitVec) -> Result<SymExpr, FromAstError> {
-        let repr = ast.to_string();
-        let mut parser = Z3Parser::new(&repr);
-        parser.parse_bitvec()
-            .map_err(|message| FromAstError::new(ast, parser.index(), message))
-    }
-
-    /// Convert this expression into a Z3-solver Ast.
-    pub fn to_z3_ast<'ctx>(&self, ctx: &'ctx Z3Context) -> Z3BitVec<'ctx> {
-        match self {
-            Int(int) => Z3BitVec::from_u64(ctx, int.1, int.0.bits() as u32),
-            Sym(sym) => Z3BitVec::new_const(ctx, sym.to_string(), sym.0.bits() as u32),
-
-            Add(a, b) => z3_binop!(ctx, a, b, bvadd),
-            Sub(a, b) => z3_binop!(ctx, a, b, bvsub),
-            Mul(a, b) => z3_binop!(ctx, a, b, bvmul),
-            BitAnd(a, b) => z3_binop!(ctx, a, b, bvand),
-            BitOr(a, b)  => z3_binop!(ctx, a, b, bvor),
-            BitNot(a)    => a.to_z3_ast(ctx).bvnot(),
-
-            Cast(x, new, signed) => {
-                let x_ast = x.to_z3_ast(ctx);
-                let src_len = x.data_type().bits() as u32;
-                let dest_len = new.bits() as u32;
-
-                if src_len < dest_len {
-                    let extra_bits = dest_len - src_len;
-                    if *signed {
-                        x_ast.sign_ext(extra_bits)
-                    } else {
-                        x_ast.zero_ext(extra_bits)
-                    }
-                } else if src_len > dest_len {
-                    x_ast.extract(dest_len, 0)
-                } else {
-                    x_ast
-                }
-            },
-            AsExpr(x, new) => {
-                x.to_z3_ast(ctx).ite(
-                    &Z3BitVec::from_u64(ctx, 1, new.bits() as u32),
-                    &Z3BitVec::from_u64(ctx, 0, new.bits() as u32),
-                )
-            }
-        }
-    }
 }
 
 macro_rules! bin_cond  {
@@ -270,22 +294,24 @@ macro_rules! bin_cond  {
 }
 
 impl SymCondition {
-    /// Convert this condition into an expression, where `true` is represented by
-    /// 1 and `false` by 0.
-    pub fn as_expr(self, data_type: DataType) -> SymExpr {
-        match self {
-            Bool(b) => Int(Integer::from_bool(b, data_type)),
-            c => AsExpr(Box::new(c), data_type),
-        }
+    /// Evaluate the condition with the given values for symbols.
+    pub fn evaluate_with<S>(&self, symbols: S) -> bool
+    where S: Fn(Symbol) -> Option<Integer> {
+        self.evaluate_inner(&symbols)
     }
 
-    bin_cond!(and, &&, And);
-    bin_cond!(or, ||, Or);
-
-    pub fn not(self) -> SymCondition {
+    fn evaluate_inner<S>(&self, symbols: &S) -> bool
+    where S: Fn(Symbol) -> Option<Integer> {
         match self {
-            Bool(x) => Bool(!x),
-            x => Not(Box::new(x)),
+            Bool(b) => *b,
+            Equal(a, b)        => a.evaluate_inner(symbols) == b.evaluate_inner(symbols),
+            Less(a, b)         => a.evaluate_inner(symbols) < b.evaluate_inner(symbols),
+            LessEqual(a, b)    => a.evaluate_inner(symbols) <= b.evaluate_inner(symbols),
+            Greater(a, b)      => a.evaluate_inner(symbols) > b.evaluate_inner(symbols),
+            GreaterEqual(a, b) => a.evaluate_inner(symbols) >= b.evaluate_inner(symbols),
+            And(a, b) => a.evaluate_inner(symbols) && b.evaluate_inner(symbols),
+            Or(a, b)  => a.evaluate_inner(symbols) && b.evaluate_inner(symbols),
+            Not(a)    => !a.evaluate_inner(symbols),
         }
     }
 
@@ -326,6 +352,25 @@ impl SymCondition {
             And(a, b) => a.to_z3_ast(ctx).and(&[&b.to_z3_ast(ctx)]),
             Or(a, b)  => a.to_z3_ast(ctx).or(&[&b.to_z3_ast(ctx)]),
             Not(a)    => a.to_z3_ast(ctx).not(),
+        }
+    }
+
+    /// Convert this condition into an expression, where `true` is represented by
+    /// 1 and `false` by 0.
+    pub fn as_expr(self, data_type: DataType) -> SymExpr {
+        match self {
+            Bool(b) => Int(Integer::from_bool(b, data_type)),
+            c => AsExpr(Box::new(c), data_type),
+        }
+    }
+
+    bin_cond!(and, &&, And);
+    bin_cond!(or, ||, Or);
+
+    pub fn not(self) -> SymCondition {
+        match self {
+            Bool(x) => Bool(!x),
+            x => Not(Box::new(x)),
         }
     }
 }
