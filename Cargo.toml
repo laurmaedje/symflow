@@ -7,4 +7,4 @@ edition = "2018"
 [dependencies]
 byteorder = "1"
 lde = "0.3"
-z3 = { git = "https://github.com/prove-rs/z3.rs" }
+z3 = { git = "https://github.com/laurmaedje/z3.rs" }

@@ -46,9 +46,9 @@ impl SymState {
             Op::Sub { diff, a, b } => self.do_binop(diff, a, b, SymExpr::sub),
             Op::Mul { prod, a, b } => self.do_binop(prod, a, b, SymExpr::mul),
 
-            Op::And { and, a, b } => self.do_binop(and, a, b, SymExpr::and),
-            Op::Or { or, a, b } => self.do_binop(or, a, b, SymExpr::or),
-            Op::Not { not, a } => self.set_temp(not, self.get_temp(a).not()),
+            Op::And { and, a, b } => self.do_binop(and, a, b, SymExpr::bit_and),
+            Op::Or { or, a, b } => self.do_binop(or, a, b, SymExpr::bit_or),
+            Op::Not { not, a } => self.set_temp(not, self.get_temp(a).bit_not()),
 
             Op::Set { target, condition } => {
                 self.set_temp(target, self.evaluate(condition).as_expr(target.0));
@@ -108,12 +108,16 @@ impl SymState {
         }
     }
 
-    /// Return the address expression of the operand if it is a memory access.
-    pub fn get_addr_for_operand(&self, operand: Operand) -> Option<SymExpr> {
+    /// Return the address expression and data type of the operand if it is a memory access.
+    pub fn get_access_for_operand(&self, operand: Operand) -> Option<TypedMemoryAccess> {
         match operand {
-            Operand::Indirect(_, reg) => Some(self.get_reg(reg)),
-            Operand::IndirectDisplaced(_, reg, offset) => {
-                Some(self.get_reg(reg).add(SymExpr::Int(Integer::from_ptr(offset as u64))))
+            Operand::Indirect(data_type, reg) => {
+                Some(TypedMemoryAccess(self.get_reg(reg), data_type))
+            },
+            Operand::IndirectDisplaced(data_type, reg, offset) => {
+                let base = self.get_reg(reg);
+                let address = base.add(SymExpr::Int(Integer::from_ptr(offset as u64)));
+                Some(TypedMemoryAccess(address, data_type))
             },
             _ => None,
         }
@@ -199,7 +203,7 @@ impl SymState {
             Greater(Op::Sub { a, b }) => self.get_temp(a).greater(self.get_temp(b)),
             GreaterEqual(Op::Sub { a, b }) => self.get_temp(a).greater_equal(self.get_temp(b)),
 
-            Equal(Op::And { a, b }) => self.get_temp(a).and(self.get_temp(b))
+            Equal(Op::And { a, b }) => self.get_temp(a).bit_and(self.get_temp(b))
                 .equal(SymExpr::Int(Integer(a.0, 0))),
 
             _ => panic!("evaluate: unhandled condition/comparison pair"),
@@ -293,5 +297,15 @@ impl Display for SymMemory {
             writeln!(f, "    {} => {}", location, value)?;
         }
         writeln!(f, "]")
+    }
+}
+
+/// A typed symbolic memory access.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TypedMemoryAccess(pub SymExpr, pub DataType);
+
+impl Display for TypedMemoryAccess {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "[{}]:{}", self.0, self.1)
     }
 }

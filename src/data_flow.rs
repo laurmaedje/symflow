@@ -2,31 +2,36 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
-use z3::ast::Ast;
+use z3::ast::{Ast, Set as Z3Set};
 
 use crate::ir::Location;
+use crate::num::{Integer, DataType};
 use crate::expr::{SymExpr, SymCondition, Symbol};
-use crate::sym::SymState;
+use crate::sym::{SymState, TypedMemoryAccess};
 use crate::control_flow::FlowGraph;
+use DataType::*;
 
 
 /// Analyzes the data flow between targets and builds a map of conditions.
-#[derive(Debug)]
 pub struct DataflowExplorer<'g> {
     graph: &'g FlowGraph,
+    z3_ctx: z3::Context,
 }
 
 impl<'g> DataflowExplorer<'g> {
     /// Create a new data flow explorer.
     pub fn new(graph: &'g FlowGraph) -> DataflowExplorer<'g> {
-        DataflowExplorer { graph }
+        DataflowExplorer {
+            graph,
+            z3_ctx: z3::Context::new(&z3::Config::new()),
+        }
     }
 
     /// Build a data flow map for the `target`. The function `get_access_addr`
     /// takes an address and a symbolic state and returns the address of a memory
     /// access of interest happening there if there is any.
     pub fn find_direct_data_flow<F>(&mut self, target_addr: u64, get_access_addr: F) -> DataFlowMap
-    where F: Fn(u64, &SymState) -> Option<SymExpr> {
+    where F: Fn(u64, &SymState) -> Option<TypedMemoryAccess> {
 
         // Find all nodes that can be backwards reached from first or second to
         // narrow down the search.
@@ -55,7 +60,7 @@ impl<'g> DataflowExplorer<'g> {
                 } else {
                     if let Some(access_mem) = access {
                         let condition = if let Some(target_mem) = target_mem.as_ref() {
-                            self.alias_condition(target_mem, &access_mem)
+                            self.aliasing_condition(target_mem, &access_mem)
                         } else {
                             SymCondition::Bool(false)
                         };
@@ -81,22 +86,32 @@ impl<'g> DataflowExplorer<'g> {
     }
 
     /// Returns the condition under which `a` and `b` point to overlapping memory.
-    fn alias_condition(&self, a: &SymExpr, b: &SymExpr) -> SymCondition {
-        let config = z3::Config::new();
-        let ctx = z3::Context::new(&config);
+    fn aliasing_condition(&self, a: &TypedMemoryAccess, b: &TypedMemoryAccess) -> SymCondition {
+        /// Return the condition under which `ptr` is in the area spanned by
+        /// pointer of `area` and the following bytes based on the data type.
+        fn contains_ptr(area: &TypedMemoryAccess, ptr: &SymExpr) -> SymCondition {
+            let area_len = SymExpr::Int(Integer::from_ptr(area.1.bytes() as u64));
+            let left = area.0.clone();
+            let right = area.0.clone().add(area_len);
+            left.less_equal(ptr.clone()).and(ptr.clone().less(right))
+        }
+
+        let condition = match (a.1, b.1) {
+            (N8, N8) => a.0.clone().equal(b.0.clone()),
+            (N8, _) => contains_ptr(b, &a.0),
+            (_, N8) => contains_ptr(a, &b.0),
+            (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
+        };
 
         // The byte data accesses are overlapping if the first address
         // equals the second one.
-        let condition = a.clone().equal(b.clone());
-        let z3_condition = condition.to_z3_ast(&ctx);
-
-        // Use Z3 to simplify the condition.
+        let z3_condition = condition.to_z3_ast(&self.z3_ctx);
         let z3_simplified = z3_condition.simplify();
         let simplified_condition = SymCondition::from_z3_ast(&z3_simplified)
             .unwrap_or(condition);
 
         // Look if the condition is even satisfiable.
-        let solver = z3::Solver::new(&ctx);
+        let solver = z3::Solver::new(&self.z3_ctx);
         solver.assert(&z3_simplified);
         let sat = solver.check();
 
@@ -196,14 +211,14 @@ mod tests {
                 assert_eq!(inst.to_string(), "mov byte ptr [rdx], al");
 
                 let target_addr = state.get_reg(Register::RDX);
-                Some(target_addr)
+                Some(TypedMemoryAccess(target_addr, N8))
 
             } else {
                 // We consider any move from somewhere as possibly moving our sensible data.
                 use Mnemoic::*;
                 if [Mov, Movzx, Movsx].contains(&inst.mnemoic) {
                     let source = inst.operands[1];
-                    state.get_addr_for_operand(source)
+                    state.get_access_for_operand(source)
                 } else {
                     None
                 }
