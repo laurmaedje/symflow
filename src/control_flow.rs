@@ -529,7 +529,8 @@ mod tests {
         test("recursive-1");
         test("recursive-2");
         test("func");
-        test("bufs");
+        test("bufs-1");
+        test("bufs-2");
     }
 
     fn test_decycle(left: Vec<&str>, right: Vec<&str>) {

@@ -113,7 +113,8 @@ mod tests {
         load_program("recursive-1");
         load_program("recursive-2");
         load_program("func");
-        load_program("bufs");
+        load_program("bufs-1");
+        load_program("bufs-2");
     }
 
     fn load_program(filename: &str) {

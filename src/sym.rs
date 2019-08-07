@@ -20,6 +20,7 @@ pub struct SymState {
     pub symbol_map: SymbolMap,
     pub path: Vec<u64>,
     pub ip: u64,
+    symbols: usize,
 }
 
 impl SymState {
@@ -27,10 +28,11 @@ impl SymState {
     pub fn new() -> SymState {
         SymState {
             temporaries: HashMap::new(),
-            memory: [SymMemory::new(0), SymMemory::new(1)],
+            memory: [SymMemory::new("mem"), SymMemory::new("reg")],
             symbol_map: SymbolMap::new(),
             path: Vec::new(),
             ip: 0,
+            symbols: 0,
         }
     }
 
@@ -194,8 +196,11 @@ impl SymState {
 
                 for i in 0 .. byte_count {
                     let target = buf.clone().add(SymExpr::from_ptr(i));
-                    let symbol = self.memory[0].new_symbol(N8);
+
+                    let symbol = Symbol(N8, "stdin", self.symbols);
                     let value = SymExpr::Sym(symbol);
+                    self.symbols += 1;
+
                     self.memory[0].write_expr(target, value);
 
                     let location = CpuLocation::IndirectMemory(Register::RSI, i as i64);
@@ -250,7 +255,7 @@ pub enum Event {
 /// values and addresses.
 #[derive(Debug, Clone)]
 pub struct SymMemory {
-    id: usize,
+    name: &'static str,
     data: RefCell<MemoryData>,
 }
 
@@ -265,9 +270,9 @@ struct MemoryData {
 
 impl SymMemory {
     /// Create a new blank symbolic memory where symbolics start at `base`.
-    pub fn new(id: usize) -> SymMemory {
+    pub fn new(name: &'static str) -> SymMemory {
         SymMemory {
-            id,
+            name,
             data: RefCell::new(MemoryData {
                 map: HashMap::new(),
                 symbols: 0,
@@ -290,7 +295,7 @@ impl SymMemory {
                 expr.clone().cast(data_type, false)
             },
             None => {
-                let value = SymExpr::Sym(Symbol(data_type, self.id, data.symbols));
+                let value = SymExpr::Sym(Symbol(data_type, self.name, data.symbols));
                 data.map.insert(addr, value.clone());
                 data.symbols += 1;
                 value
@@ -306,13 +311,6 @@ impl SymMemory {
     /// Write a value to a symbolic address.
     pub fn write_expr(&mut self, addr: SymExpr, value: SymExpr) {
         self.data.borrow_mut().map.insert(addr, value);
-    }
-
-    /// Generate a new symbol.
-    pub fn new_symbol(&mut self, data_type: DataType) -> Symbol {
-        let mut data = self.data.borrow_mut();
-        data.symbols += 1;
-        Symbol(data_type, self.id, data.symbols - 1)
     }
 }
 
@@ -371,7 +369,7 @@ impl Display for CpuLocation {
             DirectMemory(addr) => write!(f, "[{:#x}]", addr),
             IndirectMemory(reg, offset) => {
                 write!(f, "[{}", reg)?;
-                if *offset >= 0 {
+                if *offset > 0 {
                     write!(f, "+{:#x}", offset)?
                 } else if *offset < 0 {
                     write!(f, "-{:#x}", -offset)?

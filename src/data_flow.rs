@@ -2,7 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
-use z3::ast::{Ast, Set as Z3Set};
+use z3::Params as Z3Params;
+use z3::ast::Ast;
 
 use crate::ir::Location;
 use crate::num::{Integer, DataType};
@@ -100,10 +101,12 @@ impl<'g> DataflowExplorer<'g> {
         fn contains_ptr(area: &TypedMemoryAccess, ptr: &SymExpr) -> SymCondition {
             let area_len = SymExpr::Int(Integer::from_ptr(area.1.bytes() as u64));
             let left = area.0.clone();
-            let right = area.0.clone().add(area_len);
-            left.less_equal(ptr.clone()).and(ptr.clone().less(right))
+            ptr.clone().sub(left).less(area_len)
         }
 
+        // The data accesses are overlapping if the area of the first one contains
+        // the second one or the other way around, where the area is the memory
+        // from the start of the pointer until the start + the byte width.
         let condition = match (a.1, b.1) {
             (N8, N8) => a.0.clone().equal(b.0.clone()),
             (N8, _) => contains_ptr(b, &a.0),
@@ -111,20 +114,25 @@ impl<'g> DataflowExplorer<'g> {
             (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
         };
 
-        // The byte data accesses are overlapping if the first address
-        // equals the second one.
-        let z3_condition = condition.to_z3_ast(&self.z3_ctx);
-        let z3_simplified = z3_condition.simplify();
-        let simplified_condition = SymCondition::from_z3_ast(&z3_simplified)
-            .unwrap_or(condition);
 
-        // Look if the condition is even satisfiable.
+        // Simplify the condition.
+        let z3_condition = condition.to_z3_ast(&self.z3_ctx);
+        let mut params = Z3Params::new(&self.z3_ctx);
+        params.set_bool("elim_sign_ext", false);
+        let mut z3_simplified = z3_condition.simplify_ex(&params);
+        z3_simplified = z3_simplified.simplify_ex(&params);
+
+        // Look if the condition is satisfiable.
         let solver = z3::Solver::new(&self.z3_ctx);
         solver.assert(&z3_simplified);
         let sat = solver.check();
 
         if sat {
-            simplified_condition
+            SymCondition::from_z3_ast(&z3_simplified)
+                .unwrap_or_else(|_| {
+                    println!("warning: failed to simplify expression: {}", condition);
+                    condition
+                })
         } else {
             SymCondition::Bool(false)
         }
@@ -209,8 +217,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn flow_map() {
-        let program = Program::new("target/bin/bufs");
+    fn flow_map_bufs_1() {
+        let program = Program::new("target/bin/bufs-1");
         let graph = FlowGraph::new(&program);
 
         let mut explorer = DataflowExplorer::new(&graph);
@@ -248,15 +256,45 @@ mod tests {
         // Ascii 'z' is 122 and ':' is 58, so the difference is exactly 64.
         // This is the only difference that should satisfy the flow condition.
         assert!(secret_flow_condition.evaluate_with(|symbol| match symbol {
-            Symbol(N8, 0, 0) => Some(Integer(N8, 'z' as u64)),
-            Symbol(N8, 0, 1) => Some(Integer(N8, ':' as u64)),
+            Symbol(N8, "stdin", 0) => Some(Integer(N8, 'z' as u64)),
+            Symbol(N8, "stdin", 1) => Some(Integer(N8, ':' as u64)),
             _ => None,
         }));
 
         assert!(!secret_flow_condition.evaluate_with(|symbol| match symbol {
-            Symbol(N8, 0, 0) => Some(Integer(N8, 'a' as u64)),
-            Symbol(N8, 0, 1) => Some(Integer(N8, 'p' as u64)),
+            Symbol(N8, "stdin", 0) => Some(Integer(N8, 'a' as u64)),
+            Symbol(N8, "stdin", 1) => Some(Integer(N8, 'p' as u64)),
             _ => None,
         }));
+    }
+
+    #[test]
+    fn flow_map_bufs_2() {
+        let program = Program::new("target/bin/bufs-2");
+        let graph = FlowGraph::new(&program);
+
+        let mut explorer = DataflowExplorer::new(&graph);
+
+        const SECRET_WRITE_ADDR: u64 = 0x3b4;
+        let flow_map = explorer.find_direct_data_flow(SECRET_WRITE_ADDR, |addr, state| {
+            let inst = program.get_instruction(addr).unwrap();
+
+            if addr == SECRET_WRITE_ADDR {
+                assert_eq!(inst.to_string(), "mov byte ptr [rdx], al");
+                let target_addr = state.get_reg(Register::RDX);
+                Some(TypedMemoryAccess(target_addr, N8))
+
+            } else {
+                use Mnemoic::*;
+                if [Mov, Movzx, Movsx].contains(&inst.mnemoic) {
+                    let source = inst.operands[1];
+                    state.get_access_for_operand(source)
+                } else {
+                    None
+                }
+            }
+        });
+
+        println!("Data flow: {}", flow_map);
     }
 }

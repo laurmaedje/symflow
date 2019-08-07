@@ -42,7 +42,7 @@ pub enum SymCondition {
 
 /// A symbol value identified by an index.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct Symbol(pub DataType, pub usize, pub usize);
+pub struct Symbol(pub DataType, pub &'static str, pub usize);
 
 /// Make sure operations only happen on same expressions.
 fn check_compatible(a: DataType, b: DataType, operation: &str) {
@@ -420,7 +420,7 @@ impl Display for SymCondition {
 
 impl Display for Symbol {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "s{}-{}:{}", self.1, self.2, self.0)
+        write!(f, "{}-{}:{}", self.1, self.2, self.0)
     }
 }
 
@@ -477,23 +477,23 @@ impl<'a> Z3Parser<'a> {
     /// Parse a bitvector function.
     fn parse_bv_func(&mut self) -> ParseResult<SymExpr> {
         self.expect('(')?;
-        let func = self.parse_ident();
+        let func = self.parse_func_name();
         let expr = match func {
             "let" => { self.parse_let_bindings(Self::parse_bitvec)?; self.parse_bitvec()? },
             "(_" => {
                 self.skip_white();
                 let kind = self.parse_ident();
                 match kind {
-                    "zero_extend" => {
+                    "zero_extend" | "sign_extend" => {
                         self.skip_white();
                         let bits = self.parse_word_while(|c| c.is_digit(10)).parse::<usize>()
-                            .map_err(|_| "expected bits for zero extension")?;
+                            .map_err(|_| "expected value for bit extension")?;
 
                         self.expect(')')?;
                         self.skip_white();
                         let right = self.parse_bitvec()?;
 
-                        zero_extend(bits, right)?
+                        bit_extend(bits, right, kind == "sign_extend")?
                     },
                     _ => return err("unknown _ function kind"),
                 }
@@ -518,10 +518,10 @@ impl<'a> Z3Parser<'a> {
                 }
 
                 let right = self.parse_bitvec()?;
+                bit_extend(bits, right, false)?
+            },
 
-                zero_extend(bits, right)?
-            }
-            _ => return err(format!("unknown bitvec function: {}", func)),
+            _ => return err(format!("unknown bitvec function: {:?}", func)),
         };
         self.skip_white();
         self.expect(')')?;
@@ -569,8 +569,12 @@ impl<'a> Z3Parser<'a> {
     /// Parse a bitvector symbol.
     fn parse_bv_symbol(&mut self) -> ParseResult<SymExpr> {
         self.expect('|')?;
-        self.expect('s')?;
-        let space = self.parse_digit()?;
+        let space = match self.parse_word_while(char::is_alphabetic) {
+            "mem" => "mem",
+            "reg" => "reg",
+            "stdin" => "stdin",
+            s => return err(format!("invalid space name for symbol: {:?}", s)),
+        };
         self.expect('-')?;
         let index = self.parse_digit()?;
 
@@ -608,7 +612,7 @@ impl<'a> Z3Parser<'a> {
     /// Parse a boolean function.
     fn parse_bool_func(&mut self) -> ParseResult<SymCondition> {
         self.expect('(')?;
-        let func = self.parse_ident();
+        let func = self.parse_func_name();
         let cond = match func {
             "let" => { self.parse_let_bindings(Self::parse_bool)?; self.parse_bool()? },
             "=" => Equal(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?)),
@@ -622,7 +626,7 @@ impl<'a> Z3Parser<'a> {
             "or" => And(boxed(self.parse_bool()?), boxed(self.parse_bool()?)),
             "not" => Not(boxed(self.parse_bool()?)),
 
-            _ => return err(format!("unknown boolean function: {}", func)),
+            _ => return err(format!("unknown boolean function: {:?}", func)),
         };
         self.skip_white();
         self.expect(')')?;
@@ -657,13 +661,18 @@ impl<'a> Z3Parser<'a> {
         let name = self.parse_ident();
         match self.bindings.get(name) {
             Some(value) => Ok(value.clone()),
-            None => err(format!("let binding with name {} does not exist", name))
+            None => err(format!("let binding with name {:?} does not exist", name))
         }
     }
 
     /// Return everything until the next whitespace or parens.
     fn parse_ident(&mut self) -> &'a str {
         self.parse_word_while(|c| !c.is_whitespace() && c != ')' && c != '(')
+    }
+
+    /// Parse function name.
+    fn parse_func_name(&mut self) -> &'a str {
+        self.parse_word_while(|c| !c.is_whitespace())
     }
 
     /// Return everything until the predicate is false.
@@ -721,13 +730,13 @@ impl<'a> Z3Parser<'a> {
     }
 }
 
-/// Extend `right` by `bits` bits.
-fn zero_extend(bits: usize, right: SymExpr) -> ParseResult<SymExpr> {
+/// Extend `right` by `bits` bits (ones if signed, zeros otherwise).
+fn bit_extend(bits: usize, right: SymExpr, signed: bool) -> ParseResult<SymExpr> {
     match bits + right.data_type().bits() {
-        16 => Ok(right.cast(N16, false)),
-        32 => Ok(right.cast(N32, false)),
-        64 => Ok(right.cast(N64, false)),
-        s => err(format!("unhandled zero extension: invalid target size {}", s)),
+        16 => Ok(right.cast(N16, signed)),
+        32 => Ok(right.cast(N32, signed)),
+        64 => Ok(right.cast(N64, signed)),
+        s => err(format!("unhandled bit extension: invalid target size {}", s)),
     }
 }
 
@@ -799,9 +808,9 @@ mod tests {
     use crate::num::Integer;
 
     fn n(x: u64) -> SymExpr { Int(Integer(N64, x)) }
-    fn x() -> SymExpr { Sym(Symbol(N64, 0, 0)) }
-    fn y() -> SymExpr { Sym(Symbol(N8, 0, 1)) }
-    fn z() -> SymExpr { Sym(Symbol(N64, 0, 1)) }
+    fn x() -> SymExpr { Sym(Symbol(N64, "stdin", 0)) }
+    fn y() -> SymExpr { Sym(Symbol(N8, "stdin", 1)) }
+    fn z() -> SymExpr { Sym(Symbol(N64, "stdin", 1)) }
 
     #[test]
     fn calculations() {

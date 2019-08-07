@@ -13,14 +13,15 @@ void main() {
     unsigned char y = read_one_byte();
     unsigned char secret = read_one_secret_byte();
 
-    char* a = buf + x;
-    char* b = buf + 64 + y;
+    unsigned char* a = buf + x;
+    unsigned char* b = buf + y;
 
-    a[x] = secret;
-    char s = b[x];
+    b[x] = secret;
+    char s = b[a[x]];
 
     write_one_byte(s);
 }
 
 // Data dependency solution:
-// write(a, x) -> read(b, y) <=> x = y + 64
+// write(b, x) -> read(a, x) <=> x = y
+// write(b, x) -> read(b, a[x]) <=> x = y = secret || x = mem-0
