@@ -316,40 +316,35 @@ impl MicroEncoder {
         match operand {
             Operand::Direct(reg) => Direct(reg.data_type(), 1, reg.address()),
 
-            Operand::Indirect(data_type, reg) => {
-                // Load the address into a temporary.
-                let reg = self.encode_load_reg(reg);
+            Operand::Indirect { data_type, base, scaled_offset, displacement } => {
+                // Load the base into a register.
+                let reg = self.encode_load_reg(base);
+
+                // Load index and scale into temporaries, multiply them and add them to the base.
+                if let Some((index, scale)) = scaled_offset {
+                    let index_reg = self.encode_load_reg(index);
+                    let scale = self.encode_load_constant(Integer::from_ptr(scale as u64));
+
+                    self.ops.push(MicroOperation::Mul { prod: index_reg, a: index_reg, b: scale });
+                    self.ops.push(MicroOperation::Add { sum: reg, a: reg, b: index_reg });
+                }
+
+                // Add the displacement, too.
+                if let Some(disp) = displacement {
+                    let disp = self.encode_load_constant(Integer::from_ptr(disp as u64));
+                    self.ops.push(MicroOperation::Add { sum: reg, a: reg, b: disp });
+                }
+
                 Indirect(data_type, 0, reg)
             },
 
-            Operand::IndirectDisplaced(data_type, reg, displace) => {
-                // Load the base address into a temporary.
-                let reg = self.encode_load_reg(reg);
-
-                // Load the displacement constant into a temporary.
-                let offset = Temporary(DataType::N64, self.temps);
-                self.ops.push(MicroOperation::Const {
-                    dest: offset,
-                    constant: Integer(DataType::N64, displace as u64)
-                });
-
-                // Compute the final address.
-                self.ops.push(MicroOperation::Add {
-                    sum: Temporary(DataType::N64, self.temps + 1),
-                    a: reg, b: offset
-                });
-                self.temps += 2;
-
-                Indirect(data_type, 0, Temporary(DataType::N64, self.temps - 1))
-            },
-
-            Operand::Immediate(data_type, immediate) => {
+            Operand::Immediate(int) => {
                 // Load the immediate into a temporary.
-                Temp(self.encode_load_constant(data_type, immediate))
+                Temp(self.encode_load_constant(int))
             },
 
             Operand::Offset(offset) => {
-                Temp(self.encode_load_constant(DataType::N64, offset as u64))
+                Temp(self.encode_load_constant(Integer(DataType::N64, offset as u64)))
             },
         }
     }
@@ -368,9 +363,9 @@ impl MicroEncoder {
     }
 
     /// Encode the loading of a constant into a temporary.
-    fn encode_load_constant(&mut self, data_type: DataType, constant: u64) -> Temporary {
-        let dest = Temporary(data_type, self.temps);
-        self.ops.push(MicroOperation::Const { dest, constant: Integer(data_type, constant) });
+    fn encode_load_constant(&mut self, constant: Integer) -> Temporary {
+        let dest = Temporary(constant.0, self.temps);
+        self.ops.push(MicroOperation::Const { dest, constant });
         self.temps += 1;
         dest
     }
@@ -677,10 +672,10 @@ mod tests {
             mov T0:n64 = [m1][0x40:n64]
             mov T1:n64 = [m1][0x38:n64]
             const T2:n64 = 0xa:n64
-            add T3:n64 = T1:n64 + T2:n64
-            mov T4:n64 = [m0][(T3:n64):n64]
-            add T5:n64 = T0:n64 + T4:n64
-            mov [m1][0x40:n64] = T5:n64
+            add T1:n64 = T1:n64 + T2:n64
+            mov T3:n64 = [m0][(T1:n64):n64]
+            add T4:n64 = T0:n64 + T3:n64
+            mov [m1][0x40:n64] = T4:n64
         ");
 
         // Instruction: sub rsp, 0x10
@@ -718,25 +713,35 @@ mod tests {
         test(&[0x89, 0x7d, 0xfc], "
             mov T0:n64 = [m1][0x28:n64]
             const T1:n64 = 0xfffffffffffffffc:n64
-            add T2:n64 = T0:n64 + T1:n64
-            mov [m0][(T2:n64):n32] = [m1][0x38:n32]
+            add T0:n64 = T0:n64 + T1:n64
+            mov [m0][(T0:n64):n32] = [m1][0x38:n32]
         ");
 
         // Instruction: mov dword ptr [rbp-0x8], 0xa
         test(&[0xc7, 0x45, 0xf8, 0x0a, 0x00, 0x00, 0x00], "
             mov T0:n64 = [m1][0x28:n64]
             const T1:n64 = 0xfffffffffffffff8:n64
-            add T2:n64 = T0:n64 + T1:n64
-            const T3:n32 = 0xa:n32
-            mov [m0][(T2:n64):n32] = T3:n32
+            add T0:n64 = T0:n64 + T1:n64
+            const T2:n32 = 0xa:n32
+            mov [m0][(T0:n64):n32] = T2:n32
         ");
 
         // Instruction: lea rax, qword ptr [rbp-0xc]
         test(&[0x48, 0x8d, 0x45, 0xf4], "
             mov T0:n64 = [m1][0x28:n64]
             const T1:n64 = 0xfffffffffffffff4:n64
-            add T2:n64 = T0:n64 + T1:n64
-            mov [m1][0x0:n64] = T2:n64
+            add T0:n64 = T0:n64 + T1:n64
+            mov [m1][0x0:n64] = T0:n64
+        ");
+
+        // Instruction: lea rbx, qword ptr [rdx+rax*1]
+        test(&[0x48, 0x8d, 0x1c, 0x02], "
+            mov T0:n64 = [m1][0x10:n64]
+            mov T1:n64 = [m1][0x0:n64]
+            const T2:n64 = 0x1:n64
+            mul T1:n64 = T1:n64 * T2:n64
+            add T0:n64 = T0:n64 + T1:n64
+            mov [m1][0x18:n64] = T0:n64
         ");
 
         // Instruction: movzx eax, al
@@ -772,8 +777,8 @@ mod tests {
             mov T0:n32 = [m1][0x0:n32]
             mov T1:n64 = [m1][0x28:n64]
             const T2:n64 = 0xfffffffffffffff8:n64
-            add T3:n64 = T1:n64 + T2:n64
-            mov T4:n32 = [m0][(T3:n64):n32]
+            add T1:n64 = T1:n64 + T2:n64
+            mov T3:n32 = [m0][(T1:n64):n32]
         ");
 
         let mut enc = MicroEncoder::new();

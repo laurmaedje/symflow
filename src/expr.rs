@@ -102,6 +102,15 @@ macro_rules! contains {
 }
 
 impl SymExpr {
+    /// Create a new integer expression.
+    pub fn int(data_type: DataType, value: u64) -> SymExpr {
+        SymExpr::Int(Integer(data_type, value))
+    }
+
+    /// Create a new pointer-sized integer expression.
+    pub fn from_ptr(value: u64) -> SymExpr {
+        SymExpr::Int(Integer::from_ptr(value))
+    }
 
     /// Evaluate the condition with the given values for symbols.
     pub fn evaluate_with<S>(&self, symbols: S) -> Integer

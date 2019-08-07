@@ -105,19 +105,19 @@ mod tests {
 
     #[test]
     fn program() {
-        // load_program("block-1");
-        // load_program("block-2");
-        // load_program("case");
-        // load_program("twice");
-        // load_program("loop");
-        // load_program("recursive-1");
-        // load_program("recursive-2");
-        // load_program("func");
+        load_program("block-1");
+        load_program("block-2");
+        load_program("case");
+        load_program("twice");
+        load_program("loop");
+        load_program("recursive-1");
+        load_program("recursive-2");
+        load_program("func");
         load_program("bufs");
     }
 
     fn load_program(filename: &str) {
         let path = format!("target/bin/{}", filename);
-        println!("{}: {:#}\n", filename, Program::new(path));
+        println!("{}: {}\n", filename, Program::new(path));
     }
 }

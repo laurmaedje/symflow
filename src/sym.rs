@@ -38,7 +38,7 @@ impl SymState {
     pub fn step(&mut self, addr: u64, operation: MicroOperation) -> Option<Event> {
         use MicroOperation as Op;
 
-        self.set_reg(Register::RIP, SymExpr::Int(Integer::from_ptr(addr)));
+        self.set_reg(Register::RIP, SymExpr::from_ptr(addr));
         self.ip = addr;
 
         match operation {
@@ -124,14 +124,21 @@ impl SymState {
     /// Return the address expression and data type of the operand if it is a memory access.
     pub fn get_access_for_operand(&self, operand: Operand) -> Option<TypedMemoryAccess> {
         match operand {
-            Operand::Indirect(data_type, reg) => {
-                Some(TypedMemoryAccess(self.get_reg(reg), data_type))
-            },
-            Operand::IndirectDisplaced(data_type, reg, offset) => {
-                let base = self.get_reg(reg);
-                let address = base.add(SymExpr::Int(Integer::from_ptr(offset as u64)));
-                Some(TypedMemoryAccess(address, data_type))
-            },
+            Operand::Indirect { data_type, base, scaled_offset, displacement } => Some({
+                let mut addr = self.get_reg(base);
+
+                if let Some((index, scale)) = scaled_offset {
+                    let scale = SymExpr::from_ptr(scale as u64);
+                    let offset = self.get_reg(index).mul(scale);
+                    addr = addr.add(offset);
+                }
+
+                if let Some(disp) = displacement {
+                    addr = addr.add(SymExpr::from_ptr(disp as u64));
+                }
+
+                TypedMemoryAccess(addr, data_type)
+            }),
             _ => None,
         }
     }
@@ -186,7 +193,7 @@ impl SymState {
                 };
 
                 for i in 0 .. byte_count {
-                    let target = buf.clone().add(SymExpr::Int(Integer(N64, i)));
+                    let target = buf.clone().add(SymExpr::from_ptr(i));
                     let symbol = self.memory[0].new_symbol(N8);
                     let value = SymExpr::Sym(symbol);
                     self.memory[0].write_expr(target, value);
@@ -225,7 +232,7 @@ impl SymState {
             GreaterEqual(Op::Sub { a, b }) => self.get_temp(a).greater_equal(self.get_temp(b)),
 
             Equal(Op::And { a, b }) => self.get_temp(a).bit_and(self.get_temp(b))
-                .equal(SymExpr::Int(Integer(a.0, 0))),
+                .equal(SymExpr::int(a.0, 0)),
 
             _ => panic!("evaluate: unhandled condition/comparison pair"),
         }
@@ -270,7 +277,7 @@ impl SymMemory {
 
     /// Read from a direct address.
     pub fn read_direct(&self, addr: u64, data_type: DataType) -> SymExpr {
-        self.read_expr(SymExpr::Int(Integer::from_ptr(addr)), data_type)
+        self.read_expr(SymExpr::from_ptr(addr), data_type)
     }
 
     /// Read from a symbolic address.
@@ -293,7 +300,7 @@ impl SymMemory {
 
     /// Write a value to a direct address.
     pub fn write_direct(&mut self, addr: u64, value: SymExpr) {
-        self.write_expr(SymExpr::Int(Integer::from_ptr(addr)), value)
+        self.write_expr(SymExpr::from_ptr(addr), value)
     }
 
     /// Write a value to a symbolic address.
@@ -364,7 +371,7 @@ impl Display for CpuLocation {
             DirectMemory(addr) => write!(f, "[{:#x}]", addr),
             IndirectMemory(reg, offset) => {
                 write!(f, "[{}", reg)?;
-                if *offset > 0 {
+                if *offset >= 0 {
                     write!(f, "+{:#x}", offset)?
                 } else if *offset < 0 {
                     write!(f, "-{:#x}", -offset)?

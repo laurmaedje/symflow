@@ -3,7 +3,8 @@
 use std::fmt::{self, Debug, Display, Formatter};
 use byteorder::{ByteOrder, LittleEndian};
 
-use crate::num::DataType;
+use crate::num::{Integer, DataType};
+use DataType::*;
 
 
 /// A decoded machine code instruction.
@@ -31,10 +32,20 @@ pub enum Mnemoic {
 /// An operand in an instruction.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Operand {
+    /// Directly the register.
     Direct(Register),
-    Indirect(DataType, Register),
-    IndirectDisplaced(DataType, Register, i64),
-    Immediate(DataType, u64),
+    /// The value at the address stored in base plus:
+    /// - optionally a scaled offset of register * scale.
+    /// - optionally an immediate displacement.
+    Indirect {
+        data_type: DataType,
+        base: Register,
+        scaled_offset: Option<(Register, u8)>,
+        displacement: Option<i64>,
+    },
+    /// A direct immediate value.
+    Immediate(Integer),
+    /// A direct offset.
     Offset(i64),
 }
 
@@ -84,55 +95,44 @@ impl<'a> Decoder<'a> {
         } else if let PlusIm(base, width, im_w) = op {
             // Decode the register from the opcode.
             let reg = Register::from_bits(false, opcode[0] - base, width);
-            operands.push(Operand::Direct(reg));
-
-            // Parse the immediate.
             let immediate = self.decode_immediate(im_w);
-            operands.push(Operand::Immediate(im_w, immediate));
+
+            operands.push(Operand::Direct(reg));
+            operands.push(immediate);
 
         } else if let Rm(rm_w) = op {
             // Parse just the R/M part and add a direct operand with it.
-            let (modus, _, rm) = self.decode_modrm();
-            operands.push(construct_modrm_rm(rex.b, modus, rm, rm_w, None));
+            let (_, rm) = self.decode_modrm_operands(rex, N64, rm_w);
+            operands.push(rm);
 
         } else if let RegRm(reg_w, rm_w, ordered) = op {
-            // Parse the ModR/M byte with displacement.
-            let (modus, reg, rm, displace) = self.decode_modrm_displaced();
-
-            // Construct the operands.
-            let p = construct_modrm_reg(rex.r, reg, reg_w);
-            let s = construct_modrm_rm(rex.b, modus, rm, rm_w, displace);
+            let (reg, rm) = self.decode_modrm_operands(rex, reg_w, rm_w);
 
             // Insert them in the ordered denoted by the opcode.
             if ordered {
-                operands.push(p); operands.push(s);
+                operands.push(reg); operands.push(rm);
             } else {
-                operands.push(s); operands.push(p);
+                operands.push(rm); operands.push(reg);
             }
 
         } else if let RmIm(rm_w, im_w) = op {
-            // Parse the ModR/M byte with displacement.
-            let (modus, _, rm, displace) = self.decode_modrm_displaced();
-
-            // Parse the immediate.
+            let (_, rm) = self.decode_modrm_operands(rex, N64, rm_w);
             let immediate = self.decode_immediate(im_w);
 
             // Construct and insert the operands.
-            operands.push(construct_modrm_rm(rex.b, modus, rm, rm_w, displace));
-            operands.push(Operand::Immediate(im_w, immediate));
+            operands.push(rm);
+            operands.push(immediate);
 
         } else if let FixIm(left, im_w) = op {
-            // Parse the immediate.
             let immediate = self.decode_immediate(im_w);
 
             // The left operand is already given.
             operands.push(left);
-            operands.push(Operand::Immediate(im_w, immediate))
+            operands.push(immediate)
 
         } else if let Rel(width) = op {
-            // Parse the relative offset and adjust it by the length of this instruction.
             let offset = self.decode_offset(width);
-            operands.push(Operand::Offset(offset));
+            operands.push(offset);
         }
 
         Ok(Instruction {
@@ -160,7 +160,6 @@ impl<'a> Decoder<'a> {
 
     /// Decodes the opcode.
     fn decode_opcode(&mut self, rex: RexPrefix) -> (&'a [u8], Option<(Mnemoic, OperandLayout)>) {
-        use DataType::*;
         use OperandLayout::*;
 
         // Find out the length of the opcode and adjust the index.
@@ -186,6 +185,7 @@ impl<'a> Decoder<'a> {
         (opcode, Some(match opcode {
             &[0x01] => (Mnemoic::Add, RegRm(scaled, scaled, false)),
             &[0x03] => (Mnemoic::Add, RegRm(scaled, scaled, true)),
+            &[0x81] if ext == Some(0) => (Mnemoic::Add, RmIm(scaled, N32)),
             &[0x83] if ext == Some(0) => (Mnemoic::Add, RmIm(scaled, N8)),
             &[0x81] if ext == Some(5) => (Mnemoic::Sub, RmIm(scaled, N32)),
             &[0x83] if ext == Some(5) => (Mnemoic::Sub, RmIm(scaled, N8)),
@@ -232,10 +232,73 @@ impl<'a> Decoder<'a> {
     }
 
     /// Decodes the ModR/M byte and displacement.
-    fn decode_modrm_displaced(&mut self) -> (u8, u8, u8, Option<i64>) {
+    fn decode_modrm_operands(&mut self, rex: RexPrefix, reg_w: DataType, rm_w: DataType)
+    -> (Operand, Operand) {
         let (modus, reg, rm) = self.decode_modrm();
-        let displacement = self.decode_displacement(rm, modus);
-        (modus, reg, rm, displacement)
+
+        let reg_op = Operand::Direct(Register::from_bits(rex.r, reg, reg_w));
+
+        let rm_op = match modus {
+            0b00 => {
+                // Check if we use SIB, RIP-relative or R/M.
+                if rm == 0b100 {
+                    let (scale, index, base) = self.decode_sib(rex);
+                    Operand::Indirect {
+                        data_type: rm_w,
+                        base,
+                        scaled_offset: Some((index, scale)),
+                        displacement: None,
+                    }
+
+                } else if rm == 0b101 {
+                    let disp = self.decode_signed_value(N32);
+                    Operand::Indirect {
+                        data_type: rm_w,
+                        base: Register::RIP,
+                        scaled_offset: None,
+                        displacement: Some(disp),
+                    }
+
+                } else {
+                    let base = Register::from_bits(rex.b, rm, N64);
+                    Operand::Indirect {
+                        data_type: rm_w,
+                        base,
+                        scaled_offset: None,
+                        displacement: None,
+                    }
+                }
+            },
+            0b01 | 0b10 => {
+                let displace_width = if modus == 0b01 { N8 } else { N32 };
+
+                // Check if we use SIB or just R/M.
+                if rm == 0b100 {
+                    let (scale, index, base) = self.decode_sib(rex);
+                    let disp = self.decode_signed_value(displace_width);
+                    Operand::Indirect {
+                        data_type: rm_w,
+                        base,
+                        scaled_offset: Some((index, scale)),
+                        displacement: Some(disp),
+                    }
+
+                } else {
+                    let base = Register::from_bits(rex.b, rm, N64);
+                    let disp = self.decode_signed_value(displace_width);
+                    Operand::Indirect {
+                        data_type: rm_w,
+                        base,
+                        scaled_offset: None,
+                        displacement: Some(disp),
+                    }
+                }
+            },
+            0b11 => Operand::Direct(Register::from_bits(rex.b, rm, rm_w)),
+            _ => panic!("decode_modrm_operands: invalid modus"),
+        };
+
+        (reg_op, rm_op)
     }
 
     /// Decodes the ModR/M byte and returns a (modus, reg, rm) triple.
@@ -248,67 +311,50 @@ impl<'a> Decoder<'a> {
         (modus, reg, rm)
     }
 
-    /// Decodes the displacement if there is any.
-    fn decode_displacement(&mut self, rm: u8, modus: u8) -> Option<i64> {
-        let (displace, off) = match (rm, modus) {
-            (_, 0b00) if rm != 0b101 => (Some(0), 0),
-            (_, 0b01) => (Some((self.bytes[self.index] as i8) as i64), 1),
-            (_, 0b10) | (0b101, 0b00)
-                => (Some(LittleEndian::read_i32(&self.bytes[self.index ..]) as i64), 4),
-            (_, 0b11) => (None, 0),
-            _ => unreachable!(),
-        };
-        self.index += off;
-        displace
+    /// Decodes the SIB byte and returns a (scale, index, base) triple.
+    fn decode_sib(&mut self, rex: RexPrefix) -> (u8, Register, Register) {
+        let byte = self.bytes[self.index];
+        let scale = 2u8.pow((byte >> 6) as u32);
+        let index = Register::from_bits(rex.x, (byte & 0b00111000) >> 3, N64);
+        let base = Register::from_bits(rex.b, byte & 0b00000111, N64);
+        self.index += 1;
+        (scale, index, base)
     }
 
     /// Decodes an immediate value with given bit width.
-    fn decode_immediate(&mut self, width: DataType) -> u64 {
-        use DataType::*;
+    fn decode_immediate(&mut self, width: DataType) -> Operand {
+        Operand::Immediate(Integer(width, self.decode_unsigned_value(width)))
+    }
+
+    /// Decodes an offset value similar to [`decode_immediate`].
+    fn decode_offset(&mut self, width: DataType) -> Operand {
+        Operand::Offset(self.decode_signed_value(width))
+    }
+
+    /// Decode a variable width unsigned value.
+    fn decode_unsigned_value(&mut self, width: DataType) -> u64 {
         let bytes = &self.bytes[self.index ..];
-        let (imm, off) = match width {
-            N8 => (bytes[0] as u64, 1),
+        let (value, off) = match width {
+            N8 => (bytes[0] as i8 as u64, 1),
             N16 => (LittleEndian::read_u16(bytes) as u64, 2),
             N32 => (LittleEndian::read_u32(bytes) as u64, 4),
             N64 => (LittleEndian::read_u64(bytes), 8),
         };
         self.index += off;
-        imm
+        value
     }
 
-    /// Decodes an offset value similar to [`decode_immediate`].
-    fn decode_offset(&mut self, width: DataType) -> i64 {
-        use DataType::*;
+    /// Decode a variable width signed value.
+    fn decode_signed_value(&mut self, width: DataType) -> i64 {
         let bytes = &self.bytes[self.index ..];
-        let (offset, off) = match width {
-            N8 => ((bytes[0] as i8) as i64, 1),
+        let (value, off) = match width {
+            N8 => (bytes[0] as i8 as i64, 1),
             N16 => (LittleEndian::read_i16(bytes) as i64, 2),
             N32 => (LittleEndian::read_i32(bytes) as i64, 4),
             N64 => (LittleEndian::read_i64(bytes), 8),
         };
         self.index += off;
-        offset
-    }
-}
-
-/// Constructs an operand from the reg part of ModR/M.
-fn construct_modrm_reg(rex_r: bool, reg: u8, reg_w: DataType) -> Operand {
-    Operand::Direct(Register::from_bits(rex_r, reg, reg_w))
-}
-
-/// Constructs an operand from the rm part of ModR/M with a displacement.
-fn construct_modrm_rm(rex_b: bool, modus: u8, rm: u8, reg_w: DataType,
-    displace: Option<i64>) -> Operand {
-    match displace {
-        Some(0) => Operand::Indirect(reg_w, Register::from_bits(rex_b, rm, DataType::N64)),
-        Some(offset) => {
-            let reg = match (modus, rm) {
-                (0b00, 0b101) => Register::RIP,
-                _ => Register::from_bits(rex_b, rm, DataType::N64),
-            };
-            Operand::IndirectDisplaced(reg_w, reg, offset)
-        },
-        None => Operand::Direct(Register::from_bits(rex_b, rm, reg_w)),
+        value
     }
 }
 
@@ -355,23 +401,34 @@ impl Display for Mnemoic {
 impl Display for Operand {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         use Operand::*;
-        match self {
-            Direct(reg) => write!(f, "{}", reg),
-            Indirect(width, reg) => write!(f, "{} ptr [{}]", width.name(), reg),
-            IndirectDisplaced(width, reg, offset) => if *offset >= 0 {
-                write!(f, "{} ptr [{}+{:#x}]", width.name(), reg, offset)
+
+        fn write_signed(f: &mut Formatter, value: i64) -> fmt::Result {
+            if value >= 0 {
+                write!(f, "+{:#x}", value)
             } else {
-                write!(f, "{} ptr [{}-{:#x}]", width.name(), reg, -offset)
-            },
-            Immediate(_, value) => write!(f, "{:#x}", value),
-            Offset(offset) => if *offset >= 0 {
-                write!(f, "+{:#x}", offset)
-            } else {
-                write!(f, "-{:#x}", -offset)
+                write!(f, "-{:#x}", -value)
             }
+        }
+
+        match *self {
+            Direct(reg) => write!(f, "{}", reg),
+            Indirect { data_type, base, scaled_offset, displacement } => {
+                write!(f, "{} ptr [{}", data_type.name(), base)?;
+                if let Some((index, scale)) = scaled_offset {
+                    write!(f, "+{}*{}", index, scale)?;
+                }
+                if let Some(disp) = displacement {
+                    write_signed(f, disp)?;
+                }
+                write!(f, "]")
+            },
+            Immediate(int) => write!(f, "{:#x}", int.1),
+            Offset(offset) => write_signed(f, offset),
         }
     }
 }
+
+
 
 /// Identifies a register.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -396,10 +453,10 @@ impl Register {
         use Register::*;
         match self {
             RAX | RCX | RDX | RBX | RSP | RBP | RSI | RDI |
-            R8 | R9 | R10 | R11 | R12 | R13 | R14 | R15 | RIP => DataType::N64,
-            EAX | ECX | EDX | EBX | ESP | EBP | ESI | EDI | EIP => DataType::N32,
-            AX | CX | DX | BX | SP | BP | SI | DI | IP => DataType::N16,
-            AL | CL | DL | BL | AH | CH | DH | BH => DataType::N8,
+            R8 | R9 | R10 | R11 | R12 | R13 | R14 | R15 | RIP => N64,
+            EAX | ECX | EDX | EBX | ESP | EBP | ESI | EDI | EIP => N32,
+            AX | CX | DX | BX | SP | BP | SI | DI | IP => N16,
+            AL | CL | DL | BL | AH | CH | DH | BH => N8,
         }
     }
 
@@ -467,6 +524,37 @@ mod tests {
 
     #[test]
     fn decode() {
+        // Calculations
+        test(&[0x01, 0xd0], "add eax, edx");
+        test(&[0x4c, 0x03, 0x47, 0x0a], "add r8, qword ptr [rdi+0xa]");
+        test(&[0x83, 0xc0, 0x01], "add eax, 0x1");
+        test(&[0x48, 0x81, 0xc4, 0x20, 0x04, 0x00, 0x00], "add rsp, 0x420");
+        test(&[0x48, 0x81, 0xec, 0x20, 0x04, 0x00, 0x00], "sub rsp, 0x420");
+        test(&[0x0f, 0xaf, 0x45, 0xfc], "imul eax, dword ptr [rbp-0x4]");
+
+        // Comparisons
+        test(&[0x80, 0x7d, 0xff, 0x60], "cmp byte ptr [rbp-0x1], 0x60");
+        test(&[0x39, 0x45, 0xfc], "cmp dword ptr [rbp-0x4], eax");
+        test(&[0x3c, 0x40], "cmp al, 0x40");
+
+        // Moves
+        test(&[0x88, 0x45, 0xec], "mov byte ptr [rbp-0x14], al");
+        test(&[0xc6, 0x00, 0x21], "mov byte ptr [rax], 0x21");
+        test(&[0x0f, 0xbe, 0xc0], "movsx eax, al");
+        test(&[0x48, 0x8d, 0x05, 0xcb, 0xff, 0xff, 0xff], "lea rax, qword ptr [rip-0x35]");
+
+        // Jumps
+        test(&[0x7e, 0x19], "jle +0x19");
+        test(&[0xff, 0xd2], "call rdx");
+    }
+
+    #[test]
+    fn decode_mov() {
+        test(&[0x48, 0x8d, 0x1c, 0x02], "lea rbx, qword ptr [rdx+rax*1]");
+    }
+
+    #[test]
+    fn decode_block() {
         test(&[0x55], "push rbp");
         test(&[0x48, 0x89, 0xe5], "mov rbp, rsp");
         test(&[0x89, 0x7d, 0xfc], "mov dword ptr [rbp-0x4], edi");
@@ -510,23 +598,10 @@ mod tests {
         test(&[0x48, 0xc7, 0xc0, 0x3c, 0x00, 0x00, 0x00], "mov rax, 0x3c");
         test(&[0x48, 0xc7, 0xc7, 0x00, 0x00, 0x00, 0x00], "mov rdi, 0x0");
         test(&[0x0f, 0x05], "syscall");
+    }
 
-        test(&[0x01, 0xd0], "add eax, edx");
-        test(&[0x0f, 0xaf, 0x45, 0xfc], "imul eax, dword ptr [rbp-0x4]");
-
-        test(&[0x4c, 0x03, 0x47, 0x0a], "add r8, qword ptr [rdi+0xa]");
-        test(&[0x88, 0x45, 0xec], "mov byte ptr [rbp-0x14], al");
-        test(&[0x83, 0xc0, 0x01], "add eax, 0x1");
-        test(&[0x0f, 0xbe, 0xc0], "movsx eax, al");
-        test(&[0x80, 0x7d, 0xff, 0x60], "cmp byte ptr [rbp-0x1], 0x60");
-        test(&[0x7e, 0x19], "jle +0x19");
-        test(&[0x39, 0x45, 0xfc], "cmp dword ptr [rbp-0x4], eax");
-        test(&[0x3c, 0x40], "cmp al, 0x40");
-        test(&[0xff, 0xd2], "call rdx");
-        test(&[0x48, 0x8d, 0x05, 0xcb, 0xff, 0xff, 0xff], "lea rax, qword ptr [rip-0x35]");
-        test(&[0x48, 0x81, 0xec, 0x20, 0x04, 0x00, 0x00], "sub rsp, 0x420");
-        test(&[0xc6, 0x00, 0x21], "mov byte ptr [rax], 0x21");
-
+    #[test]
+    fn decode_err() {
         assert_eq!(Instruction::decode(&[0x12, 0x34]).unwrap_err().0, vec![0x12, 0x34]);
     }
 }
