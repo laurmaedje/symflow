@@ -2,13 +2,15 @@
 
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::rc::Rc;
 
 use crate::Program;
 use crate::x86_64::{Instruction, Mnemoic};
 use crate::ir::{Microcode, MicroEncoder, JumpCondition};
 use crate::num::{Integer, DataType};
 use crate::expr::SymExpr;
-use crate::sym::{SymState, Event};
+use crate::smt::Solver;
+use crate::sym::{SymState, MemoryStrategy, Event};
 
 
 /// The control flow graph representation of a program.
@@ -194,10 +196,17 @@ impl<'a> FlowConstructor<'a> {
 
     /// Build the flow graph.
     fn construct(mut self, entry: u64) -> FlowGraph {
-        self.stack.push((FlowNode {
+        let start_node = FlowNode {
             addr: entry,
             trace: vec![],
-        }, vec![], SymState::new()));
+        };
+
+        let base_state = SymState::new(
+            MemoryStrategy::PerfectMatches,
+            Rc::new(Solver::new())
+        );
+
+        self.stack.push((start_node, vec![], base_state));
 
         while let Some((node, path, mut state)) = self.stack.pop() {
             let decycled = node.decycled();

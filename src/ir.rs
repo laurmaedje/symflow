@@ -59,7 +59,6 @@ pub struct MicroEncoder {
     last_flag_op: Option<FlaggedOperation>,
 }
 
-type EncoderResult<T> = Result<T, String>;
 impl MicroEncoder {
     /// Create a new encoder.
     pub fn new() -> MicroEncoder {
@@ -399,6 +398,8 @@ impl MicroEncoder {
         }
     }
 }
+
+type EncoderResult<T> = Result<T, String>;
 
 impl Display for Microcode {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {

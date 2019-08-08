@@ -2,13 +2,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
-use z3::Params as Z3Params;
-use z3::ast::Ast;
+use std::rc::Rc;
 
-use crate::ir::Location;
 use crate::num::{Integer, DataType};
-use crate::expr::{SymExpr, SymCondition, Symbol};
-use crate::sym::{SymState, SymbolMap, TypedMemoryAccess};
+use crate::expr::{SymExpr, SymCondition};
+use crate::smt::{SharedSolver, Solver};
+use crate::sym::{SymState, MemoryStrategy, SymbolMap, TypedMemoryAccess};
 use crate::control_flow::FlowGraph;
 use DataType::*;
 
@@ -16,7 +15,7 @@ use DataType::*;
 /// Analyzes the data flow between targets and builds a map of conditions.
 pub struct DataflowExplorer<'g> {
     graph: &'g FlowGraph,
-    z3_ctx: z3::Context,
+    solver: SharedSolver,
 }
 
 impl<'g> DataflowExplorer<'g> {
@@ -24,7 +23,7 @@ impl<'g> DataflowExplorer<'g> {
     pub fn new(graph: &'g FlowGraph) -> DataflowExplorer<'g> {
         DataflowExplorer {
             graph,
-            z3_ctx: z3::Context::new(&z3::Config::new()),
+            solver: Rc::new(Solver::new()),
         }
     }
 
@@ -40,7 +39,8 @@ impl<'g> DataflowExplorer<'g> {
         let mut map = HashMap::new();
 
         // Start the simulation at the entry node (index 0).
-        let mut targets = vec![(0, SymState::new(), None)];
+        let base_state = SymState::new(MemoryStrategy::ConditionalTrees, self.solver.clone());
+        let mut targets = vec![(0, base_state, None)];
 
         // Explore the relevant part of the flow graph in search of the memory accesses.
         while let Some((target, mut state, mut target_mem)) = targets.pop() {
@@ -57,15 +57,15 @@ impl<'g> DataflowExplorer<'g> {
                 let access = get_access_addr(addr, &state);
 
                 if addr == target_addr {
-                    let access_mem = access
-                        .expect("find_direct_data_flow: expected access at target address");
+                    let access_mem = access.expect(
+                        "find_direct_data_flow: expected access at target address");
                     target_mem = Some(access_mem);
                 } else {
                     if let Some(access_mem) = access {
                         let condition = if let Some(target_mem) = target_mem.as_ref() {
-                            self.aliasing_condition(target_mem, &access_mem)
+                            self.determine_aliasing_condition(target_mem, &access_mem)
                         } else {
-                            SymCondition::Bool(false)
+                            SymCondition::FALSE
                         };
 
                         let symbols = state.symbol_map.iter()
@@ -74,6 +74,8 @@ impl<'g> DataflowExplorer<'g> {
                             .collect();
 
                         map.insert(addr, (condition, symbols));
+
+                        // println!("The memory at {:x}: {}", addr, state.memory[0]);
                     }
                 }
 
@@ -95,7 +97,8 @@ impl<'g> DataflowExplorer<'g> {
     }
 
     /// Returns the condition under which `a` and `b` point to overlapping memory.
-    fn aliasing_condition(&self, a: &TypedMemoryAccess, b: &TypedMemoryAccess) -> SymCondition {
+    fn determine_aliasing_condition(&self, a: &TypedMemoryAccess, b: &TypedMemoryAccess)
+    -> SymCondition {
         /// Return the condition under which `ptr` is in the area spanned by
         /// pointer of `area` and the following bytes based on the data type.
         fn contains_ptr(area: &TypedMemoryAccess, ptr: &SymExpr) -> SymCondition {
@@ -114,28 +117,7 @@ impl<'g> DataflowExplorer<'g> {
             (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
         };
 
-
-        // Simplify the condition.
-        let z3_condition = condition.to_z3_ast(&self.z3_ctx);
-        let mut params = Z3Params::new(&self.z3_ctx);
-        params.set_bool("elim_sign_ext", false);
-        let mut z3_simplified = z3_condition.simplify_ex(&params);
-        z3_simplified = z3_simplified.simplify_ex(&params);
-
-        // Look if the condition is satisfiable.
-        let solver = z3::Solver::new(&self.z3_ctx);
-        solver.assert(&z3_simplified);
-        let sat = solver.check();
-
-        if sat {
-            SymCondition::from_z3_ast(&z3_simplified)
-                .unwrap_or_else(|_| {
-                    println!("warning: failed to simplify expression: {}", condition);
-                    condition
-                })
-        } else {
-            SymCondition::Bool(false)
-        }
+        self.solver.simplify_condition(condition)
     }
 
     /// Find all reachable nodes for this flow analysis by walking through the
@@ -214,6 +196,7 @@ impl Display for DataFlowMap {
 mod tests {
     use crate::Program;
     use crate::x86_64::{Mnemoic, Register};
+    use crate::expr::Symbol;
     use super::*;
 
     #[test]

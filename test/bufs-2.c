@@ -24,4 +24,4 @@ void main() {
 
 // Data dependency solution:
 // write(b, x) -> read(a, x) <=> x = y
-// write(b, x) -> read(b, a[x]) <=> x = y = secret || x = mem-0
+// write(b, x) -> read(b, a[x]) <=> x == if (x == y) then secret else mem

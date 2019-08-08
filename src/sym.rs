@@ -9,30 +9,43 @@ use crate::ir::{MicroOperation, Location, Temporary, MemoryMapped};
 use crate::ir::{JumpCondition, FlaggedOperation};
 use crate::num::{Integer, DataType};
 use crate::expr::{SymExpr, SymCondition, Symbol};
+use crate::smt::SharedSolver;
 use DataType::*;
 
 
 /// The symbolic execution state.
 #[derive(Debug, Clone)]
 pub struct SymState {
+    /// The values of the temporaries (T0, T1, ...).
     pub temporaries: HashMap<usize, SymExpr>,
+    /// The two memory spaces for main memory and registers.
     pub memory: [SymMemory; 2],
+    /// A mapping from symbols to the abstract locations where they could be
+    /// found in an actual execution.
     pub symbol_map: SymbolMap,
+    /// The path of trace points which were set for this state.
     pub path: Vec<u64>,
+    /// The current instruction pointer.
     pub ip: u64,
     symbols: usize,
+    solver: SharedSolver,
 }
 
 impl SymState {
-    /// Create a blank symbolic state.
-    pub fn new() -> SymState {
+    /// Create a blank symbolic state that will use the given solver and strategy for
+    /// main memory.
+    pub fn new(mem_strategy: MemoryStrategy, solver: SharedSolver) -> SymState {
         SymState {
             temporaries: HashMap::new(),
-            memory: [SymMemory::new("mem"), SymMemory::new("reg")],
+            memory: [
+                SymMemory::new("mem", mem_strategy, solver.clone()),
+                SymMemory::new("reg", MemoryStrategy::PerfectMatches, solver.clone())
+            ],
             symbol_map: SymbolMap::new(),
             path: Vec::new(),
             ip: 0,
             symbols: 0,
+            solver
         }
     }
 
@@ -228,7 +241,7 @@ impl SymState {
         use FlaggedOperation as Op;
 
         match condition {
-            True => SymCondition::Bool(true),
+            True => SymCondition::TRUE,
 
             Equal(Op::Sub { a, b }) => self.get_temp(a).equal(self.get_temp(b)),
             Less(Op::Sub { a, b }) => self.get_temp(a).less(self.get_temp(b)),
@@ -255,8 +268,18 @@ pub enum Event {
 /// values and addresses.
 #[derive(Debug, Clone)]
 pub struct SymMemory {
-    name: &'static str,
     data: RefCell<MemoryData>,
+    solver: SharedSolver,
+    strategy: MemoryStrategy,
+}
+
+/// How the memory handled complex symbolic queries.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum MemoryStrategy {
+    /// Build an if-then-else tree of values that could possibly match.
+    ConditionalTrees,
+    /// Only return perfect matches (faster).
+    PerfectMatches,
 }
 
 /// The actual memory data, which is wrapped in an interior mutability type
@@ -264,19 +287,33 @@ pub struct SymMemory {
 /// requiring mutable access.
 #[derive(Debug, Clone)]
 struct MemoryData {
-    map: HashMap<SymExpr, SymExpr>,
+    name: &'static str,
+    entries: Vec<MemoryEntry>,
     symbols: usize,
+    epoch: u32,
+}
+
+/// A piece of data written to memory.
+#[derive(Debug, Clone)]
+struct MemoryEntry {
+    addr: SymExpr,
+    value: SymExpr,
+    epoch: u32,
 }
 
 impl SymMemory {
-    /// Create a new blank symbolic memory where symbolics start at `base`.
-    pub fn new(name: &'static str) -> SymMemory {
+    /// Create a new blank symbolic memory.
+    pub fn new(name: &'static str, strategy: MemoryStrategy, solver: SharedSolver)
+    -> SymMemory {
         SymMemory {
-            name,
             data: RefCell::new(MemoryData {
-                map: HashMap::new(),
+                name,
+                entries: Vec::new(),
                 symbols: 0,
-            })
+                epoch: 1,
+            }),
+            solver,
+            strategy,
         }
     }
 
@@ -285,32 +322,134 @@ impl SymMemory {
         self.read_expr(SymExpr::from_ptr(addr), data_type)
     }
 
-    /// Read from a symbolic address.
-    pub fn read_expr(&self, addr: SymExpr, data_type: DataType) -> SymExpr {
-        let mut data = self.data.borrow_mut();
-        match data.map.get(&addr) {
-            Some(expr) => if expr.data_type() == data_type {
-                expr.clone()
-            } else {
-                expr.clone().cast(data_type, false)
-            },
-            None => {
-                let value = SymExpr::Sym(Symbol(data_type, self.name, data.symbols));
-                data.map.insert(addr, value.clone());
-                data.symbols += 1;
-                value
-            },
-        }
-    }
-
     /// Write a value to a direct address.
     pub fn write_direct(&mut self, addr: u64, value: SymExpr) {
         self.write_expr(SymExpr::from_ptr(addr), value)
     }
 
+    /// Read from a symbolic address.
+    pub fn read_expr(&self, addr: SymExpr, data_type: DataType) -> SymExpr {
+        let mut data = self.data.borrow_mut();
+
+        let expr = if self.strategy == MemoryStrategy::ConditionalTrees {
+            // Build a map of addresses that could be the one we look for and
+            // add the conditions under which they match.
+            let mut condition_map = Vec::new();
+
+            for entry in &data.entries {
+                let perfect_match = entry.addr == addr;
+
+                if perfect_match {
+                    condition_map.push((SymCondition::TRUE, entry));
+
+                } else if self.solver.check_equal_sat(&entry.addr, &addr) {
+                    let condition = entry.addr.clone().equal(addr.clone());
+                    let simplified = self.solver.simplify_condition(condition);
+                    condition_map.push((simplified, entry));
+                }
+            }
+
+            // We sort the conditional entries by epoch inversed. This way, we can
+            // traverse them from new to old and arrange them in an if-then-else tree
+            // until we hit a perfect match (then we can stop as everything that
+            // follows was written earlier and would thus have been overwritten).
+            // If we traversed the whole map without hitting a perfect match, the
+            // accessed memory is possibly still uninitialized. In this case, we
+            // generate a new symbol and put it in as the last leaf of the tree.
+
+            condition_map.sort_by_key(|(_, entry)| std::cmp::Reverse(entry.epoch));
+
+            let mut end = 0;
+            let mut perfect_match = None;
+
+            for (index, (condition, entry)) in condition_map.iter().enumerate() {
+                if *condition == SymCondition::TRUE {
+                    // We have a perfect match.
+                    perfect_match = Some(entry.value.clone());
+                    break;
+                }
+                end = index + 1;
+            }
+
+            // Remove all entries after the perfect match.
+            condition_map.truncate(end);
+
+            // If we ended on a perfect match, we use it, otherwise we generate a default symbol.
+            let used_default_symbol = perfect_match.is_none();
+            let mut tree = perfect_match.unwrap_or_else(|| data.get_default_value(data_type));
+
+            // Now we build the if-then-else tree bottom-up.
+            for (condition, entry) in condition_map.into_iter().rev() {
+                tree = condition.if_then_else(entry.value.clone(), tree);
+            }
+
+            // If we used a default symbol previously, generate it now. We did not
+            // generate it earlier because `data` was still borrowed immutably.
+            if used_default_symbol {
+                data.generate_default_symbol(addr, data_type);
+            }
+
+            tree
+
+        } else {
+            // Look only for the newest perfect matches.
+            let mut newest_match: Option<(&SymExpr, u32)> = None;
+
+            for entry in &data.entries {
+                let perfect_match = entry.addr == addr;
+                let newer = newest_match.iter().all(|(_, epoch)| *epoch < entry.epoch);
+
+                if perfect_match && newer {
+                    newest_match = Some((&entry.value, entry.epoch));
+                }
+            }
+
+            newest_match.map(|(expr, _)| expr.clone())
+                .unwrap_or_else(|| data.generate_default_symbol(addr, data_type))
+        };
+
+        if expr.data_type() == data_type { expr } else { expr.cast(data_type, false) }
+    }
+
     /// Write a value to a symbolic address.
     pub fn write_expr(&mut self, addr: SymExpr, value: SymExpr) {
-        self.data.borrow_mut().map.insert(addr, value);
+        let mut data = self.data.borrow_mut();
+
+        let new_entry = MemoryEntry {
+            addr,
+            value,
+            epoch: data.epoch,
+        };
+
+        for entry in data.entries.iter_mut() {
+            let perfect_match = entry.addr == new_entry.addr;
+            if perfect_match {
+                *entry = new_entry;
+                return;
+            }
+        }
+
+        data.epoch += 1;
+        data.entries.push(new_entry);
+    }
+}
+
+impl MemoryData {
+    /// Get the value for the next default symbol that would be generated.
+    fn get_default_value(&self, data_type: DataType) -> SymExpr {
+        SymExpr::Sym(Symbol(data_type, self.name, self.symbols))
+    }
+
+    /// Generate a default symbol for uninitialized memory.
+    fn generate_default_symbol(&mut self, addr: SymExpr, data_type: DataType) -> SymExpr {
+        let value = self.get_default_value(data_type);
+        self.entries.push(MemoryEntry {
+            addr,
+            value: value.clone(),
+            epoch: 0,
+        });
+        self.symbols += 1;
+        value
     }
 }
 
@@ -318,9 +457,9 @@ impl Display for SymMemory {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "SymMemory [")?;
         let data = self.data.borrow();
-        if !data.map.is_empty() { writeln!(f)?; }
-        for (location, value) in &data.map {
-            writeln!(f, "    {} => {}", location, value)?;
+        if !data.entries.is_empty() { writeln!(f)?; }
+        for entry in &data.entries {
+            writeln!(f, "    [{}] {} => {}", entry.epoch, entry.addr, entry.value)?;
         }
         writeln!(f, "]")
     }
@@ -329,11 +468,12 @@ impl Display for SymMemory {
 /// When and where to find the symbolic values in memory in a real execution.
 pub type SymbolMap = HashMap<Symbol, AbstractLocation>;
 
-/// Identifies a CPU location with an address at which it is valid and a path
-/// that defines the context in which it is valid.
+/// A CPU location within the context in which it is valid.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct AbstractLocation {
+    /// The address at which the location is valid.
     pub addr: u64,
+    /// The path that should have been taken to make the location valid.
     pub path: Vec<u64>,
     pub location: CpuLocation,
 }

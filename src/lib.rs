@@ -1,6 +1,6 @@
 //! A machine code flow analyzer 🚀 for the `x86_64` architecture based on symbolic execution.
 
-#![allow(unused)]
+// #![allow(unused)]
 
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
@@ -15,10 +15,10 @@ pub mod x86_64;
 pub mod ir;
 pub mod num;
 pub mod expr;
+pub mod smt;
 pub mod sym;
 pub mod control_flow;
 pub mod data_flow;
-
 
 
 /// A decoded binary file.
