@@ -4,11 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::rc::Rc;
 
-use crate::num::{Integer, DataType};
-use crate::expr::{SymExpr, SymCondition};
-use crate::smt::{SharedSolver, Solver};
+use crate::math::{Integer, DataType, SymExpr, SymCondition, SharedSolver, Solver};
 use crate::sym::{SymState, MemoryStrategy, SymbolMap, TypedMemoryAccess};
-use crate::control_flow::FlowGraph;
+use super::FlowGraph;
 use DataType::*;
 
 
@@ -212,7 +210,7 @@ impl Display for DataFlowMap {
 mod tests {
     use crate::Program;
     use crate::x86_64::{Mnemoic, Register};
-    use crate::expr::Symbol;
+    use crate::math::Symbol;
     use super::*;
 
     #[test]

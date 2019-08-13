@@ -7,9 +7,7 @@ use std::rc::Rc;
 use crate::Program;
 use crate::x86_64::{Instruction, Mnemoic};
 use crate::ir::{Microcode, MicroEncoder, JumpCondition};
-use crate::num::{Integer, DataType};
-use crate::expr::SymExpr;
-use crate::smt::Solver;
+use crate::math::{Integer, DataType, SymExpr, Solver};
 use crate::sym::{SymState, MemoryStrategy, Event};
 
 

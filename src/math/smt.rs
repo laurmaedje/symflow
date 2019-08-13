@@ -5,8 +5,8 @@ use std::fmt::{self, Display, Debug, Formatter};
 use z3::Context as Z3Context;
 use z3::ast::Ast;
 
-use crate::expr::{SymExpr, SymCondition, SymDynamic, Symbol};
-use crate::num::{Integer, DataType::*};
+use super::{SymExpr, SymCondition, SymDynamic, Symbol};
+use super::{Integer, DataType::*};
 use SymExpr::*;
 use SymCondition::*;
 

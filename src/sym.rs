@@ -7,9 +7,7 @@ use std::fmt::{self, Display, Formatter};
 use crate::x86_64::{Register, Operand};
 use crate::ir::{MicroOperation, Location, Temporary, MemoryMapped};
 use crate::ir::{JumpCondition, FlaggedOperation};
-use crate::num::{Integer, DataType};
-use crate::expr::{SymExpr, SymCondition, Symbol};
-use crate::smt::SharedSolver;
+use crate::math::{Integer, DataType, SymExpr, SymCondition, Symbol, SharedSolver};
 use DataType::*;
 
 

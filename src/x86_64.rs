@@ -1,9 +1,9 @@
 //! Decoding of `x86_64` instructions.
 
-use std::fmt::{self, Debug, Display, Formatter};
+use std::fmt::{self, Display, Formatter};
 use byteorder::{ByteOrder, LittleEndian};
 
-use crate::num::{Integer, DataType};
+use crate::math::{Integer, DataType};
 use DataType::*;
 
 
@@ -406,14 +406,7 @@ impl Display for Mnemoic {
 impl Display for Operand {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         use Operand::*;
-
-        fn write_signed(f: &mut Formatter, value: i64) -> fmt::Result {
-            if value >= 0 {
-                write!(f, "+{:#x}", value)
-            } else {
-                write!(f, "-{:#x}", -value)
-            }
-        }
+        use crate::helper::write_signed_hex;
 
         match *self {
             Direct(reg) => write!(f, "{}", reg),
@@ -423,17 +416,15 @@ impl Display for Operand {
                     write!(f, "+{}*{}", index, scale)?;
                 }
                 if let Some(disp) = displacement {
-                    write_signed(f, disp)?;
+                    write_signed_hex(f, disp)?;
                 }
                 write!(f, "]")
             },
             Immediate(int) => write!(f, "{:#x}", int.1),
-            Offset(offset) => write_signed(f, offset),
+            Offset(offset) => write_signed_hex(f, offset),
         }
     }
 }
-
-
 
 /// Identifies a register.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -493,6 +484,7 @@ impl Register {
 
 /// The error type for instruction decoding.
 pub struct DecodingError(Vec<u8>);
+pub(in super) type DecodeResult<T> = Result<T, DecodingError>;
 
 impl DecodingError {
     /// Create a new decoding error from bytes.
@@ -501,21 +493,14 @@ impl DecodingError {
     }
 }
 
-/// The result type for instruction decoding.
-pub(in super) type DecodeResult<T> = Result<T, DecodingError>;
-impl std::error::Error for DecodingError {}
-
 impl Display for DecodingError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "Failed to decode instruction: {:02x?}", self.0)
     }
 }
 
-impl Debug for DecodingError {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        Display::fmt(self, f)
-    }
-}
+impl std::error::Error for DecodingError {}
+debug_display!(DecodingError);
 
 
 #[cfg(test)]
@@ -548,15 +533,11 @@ mod tests {
         test(&[0xc6, 0x00, 0x21], "mov byte ptr [rax], 0x21");
         test(&[0x0f, 0xbe, 0xc0], "movsx eax, al");
         test(&[0x48, 0x8d, 0x05, 0xcb, 0xff, 0xff, 0xff], "lea rax, qword ptr [rip-0x35]");
+        test(&[0x48, 0x8d, 0x1c, 0x02], "lea rbx, qword ptr [rdx+rax*1]");
 
         // Jumps
         test(&[0x7e, 0x19], "jle +0x19");
         test(&[0xff, 0xd2], "call rdx");
-    }
-
-    #[test]
-    fn decode_mov() {
-        test(&[0x48, 0x8d, 0x1c, 0x02], "lea rbx, qword ptr [rdx+rax*1]");
     }
 
     #[test]

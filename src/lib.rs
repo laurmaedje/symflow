@@ -1,6 +1,6 @@
 //! A machine code flow analyzer 🚀 for the `x86_64` architecture based on symbolic execution.
 
-#![allow(unused)]
+// #![allow(unused)]
 
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
@@ -10,15 +10,40 @@ use crate::elf::ElfFile;
 use crate::x86_64::Instruction;
 use crate::ir::{Microcode, MicroEncoder};
 
+/// Helper functions and macros that are used across the crate.
+#[macro_use]
+mod helper {
+    use std::fmt::{self, Formatter};
+
+    pub fn write_signed_hex(f: &mut Formatter, value: i64) -> fmt::Result {
+        if value >= 0 {
+            write!(f, "+{:#x}", value)
+        } else {
+            write!(f, "-{:#x}", -value)
+        }
+    }
+
+    pub fn signed_name(s: bool) -> &'static str {
+        if s { "signed" } else { "unsigned" }
+    }
+
+    macro_rules! debug_display {
+        ($type:ty) => {
+            impl std::fmt::Debug for $type {
+                fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    std::fmt::Display::fmt(self, f)
+                }
+            }
+        };
+    }
+}
+
 pub mod elf;
 pub mod x86_64;
 pub mod ir;
-pub mod num;
-pub mod expr;
-pub mod smt;
+pub mod flow;
 pub mod sym;
-pub mod control_flow;
-pub mod data_flow;
+pub mod math;
 
 
 /// A decoded binary file.
@@ -37,14 +62,14 @@ impl Program {
         let mut file = ElfFile::new(filename).unwrap();
         let text = file.get_section(".text").unwrap();
 
-        let entry = file.header.entry;
         let base = text.header.addr;
         let binary = text.data;
 
-        let mut code = Vec::new();
         let mut index = 0;
+        let mut code = Vec::new();
         let mut encoder = MicroEncoder::new();
 
+        // Decode the whole text section.
         while index < binary.len() as u64 {
             let len = Instruction::length(&binary[index as usize ..]);
             let bytes = &binary[index as usize .. (index + len) as usize];
@@ -54,6 +79,7 @@ impl Program {
             index += len;
         }
 
+        // Extract the symbol names for functions and other things.
         let mut symbols = HashMap::new();
         if let Ok(symbol_entries) = file.get_symbols() {
             for entry in symbol_entries {
@@ -65,7 +91,7 @@ impl Program {
 
         Program {
             base,
-            entry,
+            entry: file.header.entry,
             binary,
             code,
             symbols

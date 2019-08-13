@@ -1,7 +1,7 @@
 //! Parsing of the 64-bit `ELF` file format.
 
 use std::ffi::CStr;
-use std::fmt::{self, Debug, Display, Formatter};
+use std::fmt::{self, Display, Formatter};
 use std::fs::File;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -247,16 +247,7 @@ pub enum ElfError {
     Io(io::Error),
 }
 
-/// The result type for `ELF` loading.
 pub(in super) type ElfResult<T> = Result<T, ElfError>;
-impl std::error::Error for ElfError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ElfError::Io(err) => Some(err),
-            _ => None,
-        }
-    }
-}
 
 impl Display for ElfError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
@@ -268,11 +259,16 @@ impl Display for ElfError {
     }
 }
 
-impl Debug for ElfError {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        Display::fmt(self, f)
+impl std::error::Error for ElfError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ElfError::Io(err) => Some(err),
+            _ => None,
+        }
     }
 }
+
+debug_display!(ElfError);
 
 impl From<io::Error> for ElfError {
     fn from(err: io::Error) -> ElfError {

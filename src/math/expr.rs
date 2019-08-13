@@ -4,8 +4,8 @@ use std::fmt::{self, Display, Formatter};
 use z3::Context as Z3Context;
 use z3::ast::{Ast, BV as Z3BitVec, Bool as Z3Bool};
 
-use crate::num::{Integer, DataType};
-use crate::smt::{Z3Parser, FromAstError};
+use super::{Integer, DataType};
+use super::smt::{Z3Parser, FromAstError};
 use SymExpr::*;
 use SymCondition::*;
 
@@ -449,14 +449,14 @@ impl Display for SymExpr {
 
 impl Display for SymCondition {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        fn signed(s: bool) -> &'static str { if s { "signed" } else { "unsigned" } }
+        use crate::helper::signed_name;
         match self {
             Bool(b) => write!(f, "{}", b),
             Equal(a, b) => write!(f, "({} == {})", a, b),
-            LessThan(a, b, s) => write!(f, "({} < {} {})", a, b, signed(*s)),
-            LessEqual(a, b, s) => write!(f, "({} <= {} {})", a, b, signed(*s)),
-            GreaterThan(a, b, s) => write!(f, "({} > {} {})", a, b, signed(*s)),
-            GreaterEqual(a, b, s) => write!(f, "({} >= {} {})", a, b, signed(*s)),
+            LessThan(a, b, s) => write!(f, "({} < {} {})", a, b, signed_name(*s)),
+            LessEqual(a, b, s) => write!(f, "({} <= {} {})", a, b, signed_name(*s)),
+            GreaterThan(a, b, s) => write!(f, "({} > {} {})", a, b, signed_name(*s)),
+            GreaterEqual(a, b, s) => write!(f, "({} >= {} {})", a, b, signed_name(*s)),
             And(a, b) => write!(f, "({} and {})", a, b),
             Or(a, b) => write!(f, "({} or {})", a, b),
             Not(a) => write!(f, "(not {})", a),
@@ -476,8 +476,8 @@ fn boxed<T>(value: T) -> Box<T> { Box::new(value) }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::num::Integer;
-    use crate::num::DataType::*;
+    use crate::math::Integer;
+    use crate::math::DataType::*;
 
     fn n(x: u64) -> SymExpr { Int(Integer(N64, x)) }
     fn x() -> SymExpr { Sym(Symbol(N64, "stdin", 0)) }

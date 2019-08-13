@@ -1,9 +1,9 @@
 //! Microcode encoding of instructions.
 
-use std::fmt::{self, Debug, Display, Formatter};
+use std::fmt::{self, Display, Formatter};
 
 use crate::x86_64::{Instruction, Mnemoic, Operand, Register};
-use crate::num::{Integer, DataType};
+use crate::math::{Integer, DataType};
 use Register::*;
 
 
@@ -420,6 +420,7 @@ impl Display for Microcode {
 impl Display for MicroOperation {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         use MicroOperation::*;
+        use crate::helper::signed_name;
 
         fn show_condition(cond: JumpCondition) -> String {
             if let JumpCondition::True = cond { "".to_string() } else { format!(" if {}", cond) }
@@ -428,8 +429,8 @@ impl Display for MicroOperation {
         match *self {
             Mov { dest, src } => write!(f, "mov {} = {}", dest, src),
             Const { dest, constant } => write!(f, "const {} = {}", dest, constant),
-            Cast { target, new, signed } => write!(f, "cast {} to {} {}", target, new,
-                if signed { "signed" } else { "unsigned" }),
+            Cast { target, new, signed } => write!(f, "cast {} to {} {}",
+                target, new, signed_name(signed)),
 
             Add { sum, a, b } => write!(f, "add {} = {} + {}", sum, a, b),
             Sub { diff, a, b } => write!(f, "sub {} = {} - {}", diff, a, b),
@@ -557,9 +558,6 @@ impl JumpCondition {
             (GreaterEqual(Sub { a, b }), true) | (Less(Sub { a, b }), false)
                 => format!("T{} >= T{} signed", a.1, b.1),
 
-            (Equal(And { a, b }), true) => format!("T{} & T{} = 0", a.1, b.1),
-            (Equal(And { a, b }), false) => format!("T{} & T{} != 0", a.1, b.1),
-
             p => panic!("pretty_format: unhandled condition/operation/value triple: {:?}", p),
         }
     }
@@ -567,28 +565,32 @@ impl JumpCondition {
 
 impl Display for JumpCondition {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        use JumpCondition::*;
+
         match self {
-            JumpCondition::True => write!(f, "true"),
-            JumpCondition::Equal(com) => write!(f, "{} equal", com),
-            JumpCondition::Below(com) => write!(f, "{} below", com),
-            JumpCondition::BelowEqual(com) => write!(f, "{} below/equal", com),
-            JumpCondition::Above(com) => write!(f, "{} above", com),
-            JumpCondition::AboveEqual(com) => write!(f, "{} above/equal", com),
-            JumpCondition::Less(com) => write!(f, "{} less", com),
-            JumpCondition::LessEqual(com) => write!(f, "{} less/equal", com),
-            JumpCondition::Greater(com) => write!(f, "{} greater", com),
-            JumpCondition::GreaterEqual(com) => write!(f, "{} greater/equal", com),
+            True => write!(f, "true"),
+            Equal(com) => write!(f, "{} equal", com),
+            Below(com) => write!(f, "{} below", com),
+            BelowEqual(com) => write!(f, "{} below/equal", com),
+            Above(com) => write!(f, "{} above", com),
+            AboveEqual(com) => write!(f, "{} above/equal", com),
+            Less(com) => write!(f, "{} less", com),
+            LessEqual(com) => write!(f, "{} less/equal", com),
+            Greater(com) => write!(f, "{} greater", com),
+            GreaterEqual(com) => write!(f, "{} greater/equal", com),
         }
     }
 }
 
 impl Display for FlaggedOperation {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        use FlaggedOperation::*;
+
         match self {
-            FlaggedOperation::Add { a, b } => write!(f, "{} + {}", a, b),
-            FlaggedOperation::Sub { a, b } => write!(f, "{} - {}", a, b),
-            FlaggedOperation::Mul { a, b } => write!(f, "{} * {}", a, b),
-            FlaggedOperation::And { a, b } => write!(f, "{} & {}", a, b),
+            Add { a, b } => write!(f, "{} + {}", a, b),
+            Sub { a, b } => write!(f, "{} - {}", a, b),
+            Mul { a, b } => write!(f, "{} * {}", a, b),
+            And { a, b } => write!(f, "{} & {}", a, b),
         }
     }
 }
@@ -628,6 +630,7 @@ impl MemoryMapped for Register {
 /// The error type for microcode encoding.
 #[derive(Eq, PartialEq)]
 pub struct EncodingError(Instruction, String);
+pub(in super) type EncodeResult<T> = Result<T, EncodingError>;
 
 impl EncodingError {
     /// Create a new encoding error with a message.
@@ -636,21 +639,14 @@ impl EncodingError {
     }
 }
 
-/// Result type for instruction decoding.
-pub(in super) type EncodeResult<T> = Result<T, EncodingError>;
-impl std::error::Error for EncodingError {}
-
 impl Display for EncodingError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "Failed to encode instruction: {} [{}]", self.1, self.0)
     }
 }
 
-impl Debug for EncodingError {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        Display::fmt(self, f)
-    }
-}
+impl std::error::Error for EncodingError {}
+debug_display!(EncodingError);
 
 
 #[cfg(test)]
