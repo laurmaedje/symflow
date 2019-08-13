@@ -5,6 +5,7 @@ use std::fmt::{self, Display, Formatter};
 use std::ops::{BitAnd, BitOr};
 use byteorder::{ByteOrder, LittleEndian};
 
+use crate::helper::check_compatible;
 use DataType::*;
 
 
@@ -46,11 +47,6 @@ macro_rules! flags {
             overflow: false,
         }
     };
-}
-
-/// Make sure operations only happen on same integers.
-fn check_compatible(a: DataType, b: DataType, operation: &str) {
-    assert_eq!(a, b, "incompatible data types for integer {}", operation);
 }
 
 /// Arithmetic operation with flags.
@@ -123,6 +119,28 @@ impl Integer {
         buf
     }
 
+    binop!(add, wrapping_add);
+    binop!(sub, wrapping_sub);
+    binop!(mul, wrapping_mul);
+    binop!(bitand, bitand);
+    binop!(bitor, bitor);
+
+    pub fn bitnot(self) -> Integer {
+        Integer(self.0, typed!(cast => self.0, false, { !cast(self.1) as u64 }))
+    }
+
+    pub fn equal(self, other: Integer) -> bool {
+        check_compatible(self.0, other.0, "comparison");
+        typed!(cast => self.0, false, {
+            cast(self.1) == cast(other.1)
+        })
+    }
+
+    cmp_maybe_signed!(less_than, lt);
+    cmp_maybe_signed!(less_equal, le);
+    cmp_maybe_signed!(greater_than, gt);
+    cmp_maybe_signed!(greater_equal, ge);
+
     /// Cast the integer to another type.
     /// - If the target type is smaller, it will get truncated.
     /// - If the target type is bigger, if signed is true the value will be
@@ -135,28 +153,6 @@ impl Integer {
             })
         }))
     }
-
-    binop!(add, wrapping_add);
-    binop!(sub, wrapping_sub);
-    binop!(mul, wrapping_mul);
-    binop!(bitand, bitand);
-    binop!(bitor, bitor);
-
-    pub fn bitnot(self) -> Integer {
-        Integer(self.0, typed!(cast => self.0, false, { !cast(self.1) as u64 }))
-    }
-
-    pub fn equal(self, other: &Integer) -> bool {
-        check_compatible(self.0, other.0, "comparison");
-        typed!(cast => self.0, false, {
-            cast(self.1) == cast(other.1)
-        })
-    }
-
-    cmp_maybe_signed!(less_than, lt);
-    cmp_maybe_signed!(less_equal, le);
-    cmp_maybe_signed!(greater_than, gt);
-    cmp_maybe_signed!(greater_equal, ge);
 
     // Operations with CPU flags.
     flagged!(flagged_add, sum, a, b => wrapping_add, Flags {
@@ -181,7 +177,7 @@ impl Display for Integer {
 impl Eq for Integer {}
 impl PartialEq for Integer {
     fn eq(&self, other: &Integer) -> bool {
-        self.equal(other)
+        self.equal(*other)
     }
 }
 

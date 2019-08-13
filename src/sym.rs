@@ -6,7 +6,6 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::x86_64::{Register, Operand};
 use crate::ir::{MicroOperation, Location, Temporary, MemoryMapped};
-use crate::ir::{JumpCondition, FlaggedOperation};
 use crate::math::{Integer, DataType, SymExpr, SymCondition, Symbol, SharedSolver};
 use DataType::*;
 
@@ -25,8 +24,10 @@ pub struct SymState {
     pub path: Vec<u64>,
     /// The current instruction pointer.
     pub ip: u64,
+    /// The shared SMT solver.
+    pub solver: SharedSolver,
+    /// The number of used symbols.
     symbols: usize,
-    solver: SharedSolver,
 }
 
 impl SymState {
@@ -48,37 +49,37 @@ impl SymState {
     }
 
     /// Execute a micro operation.
-    pub fn step(&mut self, addr: u64, operation: MicroOperation) -> Option<Event> {
+    pub fn step(&mut self, addr: u64, operation: &MicroOperation) -> Option<Event> {
         use MicroOperation as Op;
 
         self.set_reg(Register::RIP, SymExpr::from_ptr(addr));
         self.ip = addr;
 
         match operation {
-            Op::Mov { dest, src } => self.do_move(dest, src),
+            Op::Mov { dest, src } => self.do_move(*dest, *src),
 
-            Op::Const { dest, constant } => self.set_temp(dest, SymExpr::Int(constant)),
+            Op::Const { dest, constant } => self.set_temp(*dest, SymExpr::Int(*constant)),
             Op::Cast { target, new, signed } => {
-                let new_value = self.get_temp(target).cast(new, signed);
-                self.set_temp(Temporary(new, target.1), new_value);
+                let new_value = self.get_temp(*target).cast(*new, *signed);
+                self.set_temp(Temporary(*new, target.1), new_value);
             },
 
-            Op::Add { sum, a, b } => self.do_binop(sum, a, b, SymExpr::add),
-            Op::Sub { diff, a, b } => self.do_binop(diff, a, b, SymExpr::sub),
-            Op::Mul { prod, a, b } => self.do_binop(prod, a, b, SymExpr::mul),
+            Op::Add { sum, a, b } => self.do_binop(*sum, *a, *b, SymExpr::add),
+            Op::Sub { diff, a, b } => self.do_binop(*diff, *a, *b, SymExpr::sub),
+            Op::Mul { prod, a, b } => self.do_binop(*prod, *a, *b, SymExpr::mul),
 
-            Op::And { and, a, b } => self.do_binop(and, a, b, SymExpr::bitand),
-            Op::Or { or, a, b } => self.do_binop(or, a, b, SymExpr::bitor),
-            Op::Not { not, a } => self.set_temp(not, self.get_temp(a).bitnot()),
+            Op::And { and, a, b } => self.do_binop(*and, *a, *b, SymExpr::bitand),
+            Op::Or { or, a, b } => self.do_binop(*or, *a, *b, SymExpr::bitor),
+            Op::Not { not, a } => self.set_temp(*not, self.get_temp(*a).bitnot()),
 
             Op::Set { target, condition } => {
-                self.set_temp(target, self.evaluate(condition).as_expr(target.0));
+                self.set_temp(*target, self.evaluate_condition(&condition).as_expr(target.0));
             },
             Op::Jump { target, condition, relative } => {
                 return Some(Event::Jump {
-                    target: self.get_temp(target),
-                    condition,
-                    relative
+                    target: self.get_temp(*target),
+                    condition: condition.clone(),
+                    relative: *relative,
                 });
             },
 
@@ -101,31 +102,14 @@ impl SymState {
         self.path.push(addr);
     }
 
-    /// Evaluate a jump condition.
-    pub fn evaluate(&self, condition: JumpCondition) -> SymCondition {
-        use JumpCondition::*;
-        use FlaggedOperation as Op;
-
-        match condition {
-            True => SymCondition::TRUE,
-
-            Equal(Op::Sub { a, b }) => self.get_temp(a).equal(self.get_temp(b)),
-
-            Below(Op::Sub { a, b }) => self.get_temp(a).less_than(self.get_temp(b), false),
-            BelowEqual(Op::Sub { a, b }) => self.get_temp(a).less_equal(self.get_temp(b), false),
-            Above(Op::Sub { a, b }) => self.get_temp(a).greater_than(self.get_temp(b), false),
-            AboveEqual(Op::Sub { a, b }) => self.get_temp(a).greater_equal(self.get_temp(b), false),
-
-            Less(Op::Sub { a, b }) => self.get_temp(a).less_than(self.get_temp(b), true),
-            LessEqual(Op::Sub { a, b }) => self.get_temp(a).less_equal(self.get_temp(b), true),
-            Greater(Op::Sub { a, b }) => self.get_temp(a).greater_than(self.get_temp(b), true),
-            GreaterEqual(Op::Sub { a, b }) => self.get_temp(a).greater_equal(self.get_temp(b), true),
-
-            Equal(Op::And { a, b }) => self.get_temp(a).bitand(self.get_temp(b))
-                .equal(SymExpr::int(a.0, 0)),
-
-            _ => panic!("evaluate: unhandled condition/comparison pair"),
-        }
+    /// Evaluate a symbolic expression with temporary symbols.
+    pub fn evaluate_condition(&self, condition: &SymCondition) -> SymCondition {
+        let mut evaluated = condition.clone();
+        evaluated.replace_symbols(&|sym| match sym {
+            Symbol(data_type, "T", index) => self.get_temp(Temporary(data_type, index)),
+            sym => SymExpr::Sym(sym),
+        });
+        evaluated
     }
 
     /// Return the address expression and data type of the operand if it is a memory access.
@@ -264,7 +248,7 @@ impl SymState {
 /// Events occuring during symbolic execution.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Event {
-    Jump { target: SymExpr, condition: JumpCondition, relative: bool },
+    Jump { target: SymExpr, condition: SymCondition, relative: bool },
     Exit,
 }
 
@@ -307,8 +291,7 @@ struct MemoryEntry {
 
 impl SymMemory {
     /// Create a new blank symbolic memory.
-    pub fn new(name: &'static str, strategy: MemoryStrategy, solver: SharedSolver)
-    -> SymMemory {
+    pub fn new(name: &'static str, strategy: MemoryStrategy, solver: SharedSolver) -> SymMemory {
         SymMemory {
             data: RefCell::new(MemoryData {
                 name,
@@ -348,7 +331,7 @@ impl SymMemory {
 
                 } else if self.solver.check_equal_sat(&entry.addr, &addr) {
                     let condition = entry.addr.clone().equal(addr.clone());
-                    let simplified = self.solver.simplify_condition(condition);
+                    let simplified = self.solver.simplify_condition(&condition);
                     condition_map.push((simplified, entry));
                 }
             }

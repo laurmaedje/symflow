@@ -3,8 +3,9 @@
 use std::fmt::{self, Display, Formatter};
 
 use crate::x86_64::{Instruction, Mnemoic, Operand, Register};
-use crate::math::{Integer, DataType};
+use crate::math::{Integer, DataType, SymExpr, SymCondition, Symbol};
 use Register::*;
+use SymCondition::*;
 
 
 /// A sequence of micro operations.
@@ -14,7 +15,7 @@ pub struct Microcode {
 }
 
 /// A minimal executable action.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum MicroOperation {
     /// Store the value at location `src` in location `dest`.
     Mov { dest: Location, src: Location },
@@ -42,14 +43,61 @@ pub enum MicroOperation {
     Not { not: Temporary, a: Temporary },
 
     /// Set the target temporary to one if the condition is true and to zero otherwise.
-    Set { target: Temporary, condition: JumpCondition },
+    Set { target: Temporary, condition: SymCondition },
     /// Jump to the current address plus the `offset` if `relative` is true,
     /// otherwise directly to the target if the condition specified by `condition`
     /// is fulfilled.
-    Jump { target: Temporary, condition: JumpCondition, relative: bool },
+    Jump { target: Temporary, condition: SymCondition, relative: bool },
 
     /// Perform a syscall.
     Syscall,
+}
+
+impl Display for Microcode {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "Microcode [")?;
+        if !self.ops.is_empty() { writeln!(f)?; }
+        for operation in &self.ops {
+            writeln!(f, "    {}", operation)?;
+        }
+        write!(f, "]")
+    }
+}
+
+impl Display for MicroOperation {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        use MicroOperation::*;
+        use crate::helper::signed_name;
+
+        fn show_condition(condition: &SymCondition) -> String {
+            match condition {
+                &SymCondition::TRUE => "".to_string(),
+                cond => format!(" if {}", cond),
+            }
+        }
+
+        match self {
+            Mov { dest, src } => write!(f, "mov {} = {}", dest, src),
+            Const { dest, constant } => write!(f, "const {} = {}", dest, constant),
+            Cast { target, new, signed } => write!(f, "cast {} to {} {}",
+                target, new, signed_name(*signed)),
+
+            Add { sum, a, b } => write!(f, "add {} = {} + {}", sum, a, b),
+            Sub { diff, a, b } => write!(f, "sub {} = {} - {}", diff, a, b),
+            Mul { prod, a, b } => write!(f, "mul {} = {} * {}", prod, a, b),
+
+            And { and, a, b } => write!(f, "and {} = {} & {}", and, a, b),
+            Or { or, a, b } => write!(f, "or {} = {} | {}", or, a, b),
+            Not { not, a } => write!(f, "not {} = !{}", not, a),
+
+            Set { target, condition } => write!(f, "set {}{}",
+                target, show_condition(condition)),
+            Jump { target, condition, relative } => write!(f, "jump {} {}{}",
+                if *relative { "by" } else { "to" }, target, show_condition(condition)),
+
+            Syscall => write!(f, "syscall"),
+        }
+    }
 }
 
 /// Encodes instructions into microcode.
@@ -57,7 +105,20 @@ pub enum MicroOperation {
 pub struct MicroEncoder {
     ops: Vec<MicroOperation>,
     temps: usize,
-    last_flag_op: Option<FlaggedOperation>,
+    last_flag_op: Option<SymExpr>,
+}
+
+type EncoderResult<T> = Result<T, String>;
+
+/// Constructs a `SymCondition` from the last flag-modifying operation.
+macro_rules! condition {
+    ($self:expr; $($flag_op:pat => $cond:expr),* ) => {
+        match $self.last_flag_op.clone() {
+            $(Some($flag_op) => Ok($cond),)*
+            Some(op) => panic!("condition!: unhandled last op: {:?}", op),
+            None => Err("get_comparison: no previous flag-modifying operation".to_string()),
+        }
+    };
 }
 
 impl MicroEncoder {
@@ -85,15 +146,24 @@ impl MicroEncoder {
             // Load both operands, perform an operation and write the result back.
             Add => {
                 let (a, b) = self.encode_binop(inst, |sum, a, b| Op::Add { sum, a, b });
-                self.last_flag_op = Some(FlaggedOperation::Add { a, b });
+                self.last_flag_op = Some(a.to_expr().add(b.to_expr()));
             },
             Sub => {
                 let (a, b) = self.encode_binop(inst, |diff, a, b| Op::Sub { diff, a, b });
-                self.last_flag_op = Some(FlaggedOperation::Sub { a, b });
+                self.last_flag_op = Some(a.to_expr().sub(b.to_expr()));
             },
             Imul => {
                 let (a, b) = self.encode_binop(inst, |prod, a, b| Op::Mul { prod, a, b });
-                self.last_flag_op = Some(FlaggedOperation::Mul { a, b });
+                self.last_flag_op = Some(a.to_expr().mul(b.to_expr()));
+            },
+
+            Cmp => {
+                let ((_dest, left), (_src, right)) = self.encode_load_both(inst);
+                self.last_flag_op = Some(left.to_expr().sub(right.to_expr()));
+            },
+            Test => {
+                let ((_dest, left), (_src, right)) = self.encode_load_both(inst);
+                self.last_flag_op = Some(left.to_expr().bitand(right.to_expr()));
             },
 
             // Retrieve both locations and move from source to destination.
@@ -140,19 +210,23 @@ impl MicroEncoder {
             },
 
             // Jump to the first operand under specific conditions.
-            Jmp => self.encode_jump(inst, JumpCondition::True),
-            Je => self.encode_comp_jump(inst, JumpCondition::Equal)?,
-            Jbe => self.encode_comp_jump(inst, JumpCondition::BelowEqual)?,
-            Jl => self.encode_comp_jump(inst, JumpCondition::Less)?,
-            Jle => self.encode_comp_jump(inst, JumpCondition::LessEqual)?,
-            Jg => self.encode_comp_jump(inst, JumpCondition::Greater)?,
-            Jge => self.encode_comp_jump(inst, JumpCondition::GreaterEqual)?,
+            Jmp => self.encode_jump(inst, SymCondition::TRUE),
+            Je  => self.encode_jump(inst, condition!(self;
+                SymExpr::Sub(a, b) => Equal(a, b),
+                SymExpr::BitAnd(a, b) => SymExpr::from_int(a.data_type(), 0).equal(a.bitand(*b))
+            )?),
+            Jbe => self.encode_jump(inst, condition!(self; SymExpr::Sub(a, b) => LessEqual(a, b, false))?),
+            Jl  => self.encode_jump(inst, condition!(self; SymExpr::Sub(a, b) => LessThan(a, b, true))?),
+            Jle => self.encode_jump(inst, condition!(self; SymExpr::Sub(a, b) => LessEqual(a, b, true))?),
+            Jg  => self.encode_jump(inst, condition!(self; SymExpr::Sub(a, b) => GreaterThan(a, b, true))?),
+            Jge => self.encode_jump(inst, condition!(self; SymExpr::Sub(a, b) => GreaterEqual(a, b, true))?),
+            Setl => self.encode_set(inst, condition!(self; SymExpr::Sub(a, b) => LessThan(a, b, true))?)?,
 
             // Save the procedure linking information on the stack and jump.
             Call => {
                 let rip = self.encode_get_location(Operand::Direct(Register::RIP));
                 self.encode_push(rip)?;
-                self.encode_jump(inst, JumpCondition::True);
+                self.encode_jump(inst, SymCondition::TRUE);
             },
 
             // Copies the base pointer into the stack pointer register and pops the
@@ -169,18 +243,8 @@ impl MicroEncoder {
                 let target = Temporary(DataType::N64, self.temps);
                 self.temps += 1;
                 self.encode_pop(Location::Temp(target))?;
-                self.ops.push(Op::Jump { target, condition: JumpCondition::True, relative: false });
+                self.ops.push(Op::Jump { target, condition: SymCondition::TRUE, relative: false });
             },
-
-            Cmp => {
-                let ((_, a), (_, b)) = self.encode_load_both(inst);
-                self.last_flag_op = Some(FlaggedOperation::Sub { a, b });
-            }
-            Test => {
-                let ((_, a), (_, b)) = self.encode_load_both(inst);
-                self.last_flag_op = Some(FlaggedOperation::And { a, b });
-            }
-            Setl => self.encode_comp_set(inst, JumpCondition::Less)?,
 
             Syscall => { self.ops.push(Op::Syscall); },
             Nop => {},
@@ -207,7 +271,7 @@ impl MicroEncoder {
     }
 
     /// Encode a conditional, relative jump.
-    fn encode_jump(&mut self, inst: &Instruction, condition: JumpCondition) {
+    fn encode_jump(&mut self, inst: &Instruction, condition: SymCondition) {
         let operand = inst.operands[0];
         let relative = match operand {
             Operand::Offset(_) => true,
@@ -217,25 +281,13 @@ impl MicroEncoder {
         self.ops.push(MicroOperation::Jump { target, condition, relative });
     }
 
-    /// Encode a jump from the last comparison.
-    fn encode_comp_jump<F>(&mut self, inst: &Instruction, comp: F) -> EncoderResult<()>
-    where F: FnOnce(FlaggedOperation) -> JumpCondition {
-        Ok(self.encode_jump(inst, comp(self.get_last_flag_op()?)))
-    }
-
     /// Encode a set instruction, which sets a bit based on a condition.
-    fn encode_set(&mut self, inst: &Instruction, condition: JumpCondition) -> EncoderResult<()> {
+    fn encode_set(&mut self, inst: &Instruction, condition: SymCondition) -> EncoderResult<()> {
         let location = self.encode_get_location(inst.operands[0]);
         let temp = Temporary(location.data_type(), self.temps);
         self.temps += 1;
         self.ops.push(MicroOperation::Set { target: temp, condition });
         self.encode_move(location, Location::Temp(temp))
-    }
-
-    /// Encode a set from the last comparison.
-    fn encode_comp_set<F>(&mut self, inst: &Instruction, comp: F) -> EncoderResult<()>
-    where F: FnOnce(FlaggedOperation) -> JumpCondition {
-        self.encode_set(inst, comp(self.get_last_flag_op()?))
     }
 
     /// Encode a push instruction.
@@ -394,60 +446,6 @@ impl MicroEncoder {
 
         Ok(self.ops.push(MicroOperation::Mov { dest, src }))
     }
-
-    /// Get the flagged operation which matches the last instruction modifying the flags.
-    fn get_last_flag_op(&self) -> EncoderResult<FlaggedOperation> {
-        match self.last_flag_op {
-            Some(cmp) => Ok(cmp),
-            None => Err("get_comparison: no previous flag-modifying operation".to_string()),
-        }
-    }
-}
-
-type EncoderResult<T> = Result<T, String>;
-
-impl Display for Microcode {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Microcode [")?;
-        if !self.ops.is_empty() { writeln!(f)?; }
-        for operation in &self.ops {
-            writeln!(f, "    {}", operation)?;
-        }
-        write!(f, "]")
-    }
-}
-
-impl Display for MicroOperation {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        use MicroOperation::*;
-        use crate::helper::signed_name;
-
-        fn show_condition(cond: JumpCondition) -> String {
-            if let JumpCondition::True = cond { "".to_string() } else { format!(" if {}", cond) }
-        }
-
-        match *self {
-            Mov { dest, src } => write!(f, "mov {} = {}", dest, src),
-            Const { dest, constant } => write!(f, "const {} = {}", dest, constant),
-            Cast { target, new, signed } => write!(f, "cast {} to {} {}",
-                target, new, signed_name(signed)),
-
-            Add { sum, a, b } => write!(f, "add {} = {} + {}", sum, a, b),
-            Sub { diff, a, b } => write!(f, "sub {} = {} - {}", diff, a, b),
-            Mul { prod, a, b } => write!(f, "mul {} = {} * {}", prod, a, b),
-
-            And { and, a, b } => write!(f, "and {} = {} & {}", and, a, b),
-            Or { or, a, b } => write!(f, "or {} = {} | {}", or, a, b),
-            Not { not, a } => write!(f, "not {} = !{}", not, a),
-
-            Set { target, condition } => write!(f, "set {}{}",
-                target, show_condition(condition)),
-            Jump { target, condition, relative } => write!(f, "jump {} {}{}",
-                if relative { "by" } else { "to" }, target, show_condition(condition)),
-
-            Syscall => write!(f, "syscall"),
-        }
-    }
 }
 
 /// Pinpoints a target in memory or temporaries.
@@ -484,114 +482,21 @@ impl Display for Location {
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Temporary(pub DataType, pub usize);
 
+impl Temporary {
+    /// Create a symbol matching this temporary.
+    pub fn to_symbol(self) -> Symbol {
+        Symbol(self.0, "T", self.1)
+    }
+
+    /// Convert this into a symbol expression.
+    pub fn to_expr(self) -> SymExpr {
+        SymExpr::Sym(self.to_symbol())
+    }
+}
+
 impl Display for Temporary {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "T{}:{}", self.1, self.0)
-    }
-}
-
-/// The condition for jumps and sets.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum JumpCondition {
-    /// Jump always.
-    True,
-    /// Jump if equal (zero flag = 1).
-    Equal(FlaggedOperation),
-    /// Jump if below (carry flag = 1).
-    Below(FlaggedOperation),
-    /// Jump if below or equal (carry flag = 1 or zero flag = 1).
-    BelowEqual(FlaggedOperation),
-    /// Jump if above (carry flag = 0 and zero flag = 0).
-    Above(FlaggedOperation),
-    /// Jump if above or equal (carry flag = 0).
-    AboveEqual(FlaggedOperation),
-    /// Jump if less (sign flag ≠ overflow flag).
-    Less(FlaggedOperation),
-    /// Jump if less or equal (zero flag = 1 or sign flag ≠ overflow flag).
-    LessEqual(FlaggedOperation),
-    /// Jump if greater (zero flag = 0 and sign flag = overflow flag).
-    Greater(FlaggedOperation),
-    /// Jump if greater or equal (sign flag = overflow flag).
-    GreaterEqual(FlaggedOperation),
-}
-
-/// An operation which would modify the flag registers.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum FlaggedOperation {
-    Add { a: Temporary, b: Temporary },
-    Sub { a: Temporary, b: Temporary },
-    Mul { a: Temporary, b: Temporary },
-    And { a: Temporary, b: Temporary },
-}
-
-impl JumpCondition {
-    /// Return a more readable version of the condition.
-    ///
-    /// If `value` is `true` the string represents the condition being fulfilled
-    /// and otherwise the inverse.
-    pub fn pretty_format(&self, value: bool) -> String {
-        use JumpCondition::*;
-        use FlaggedOperation::*;
-
-        match (self, value) {
-            (True, true) => "True".to_string(),
-            (True, false) => "False".to_string(),
-
-            (Equal(Sub { a, b }), true) => format!("T{} = T{}", a.1, b.1),
-            (Equal(Sub { a, b }), false) => format!("T{} != T{}", a.1, b.1),
-
-            (Below(Sub { a, b }), true) | (AboveEqual(Sub { a, b }), false)
-                => format!("T{} < T{} unsigned", a.1, b.1),
-            (BelowEqual(Sub { a, b }), true) | (Above(Sub { a, b }), false)
-                => format!("T{} <= T{} unsigned", a.1, b.1),
-            (Above(Sub { a, b }), true) | (BelowEqual(Sub { a, b }), false)
-                => format!("T{} > T{} unsigned", a.1, b.1),
-            (AboveEqual(Sub { a, b }), true) | (Below(Sub { a, b }), false)
-                => format!("T{} >= T{} unsigned", a.1, b.1),
-
-            (Less(Sub { a, b }), true) | (GreaterEqual(Sub { a, b }), false)
-                => format!("T{} < T{} signed", a.1, b.1),
-            (LessEqual(Sub { a, b }), true) | (Greater(Sub { a, b }), false)
-                => format!("T{} <= T{} signed", a.1, b.1),
-            (Greater(Sub { a, b }), true) | (LessEqual(Sub { a, b }), false)
-                => format!("T{} > T{} signed", a.1, b.1),
-            (GreaterEqual(Sub { a, b }), true) | (Less(Sub { a, b }), false)
-                => format!("T{} >= T{} signed", a.1, b.1),
-
-            p => panic!("pretty_format: unhandled condition/operation/value triple: {:?}", p),
-        }
-    }
-}
-
-impl Display for JumpCondition {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        use JumpCondition::*;
-
-        match self {
-            True => write!(f, "true"),
-            Equal(com) => write!(f, "{} equal", com),
-            Below(com) => write!(f, "{} below", com),
-            BelowEqual(com) => write!(f, "{} below/equal", com),
-            Above(com) => write!(f, "{} above", com),
-            AboveEqual(com) => write!(f, "{} above/equal", com),
-            Less(com) => write!(f, "{} less", com),
-            LessEqual(com) => write!(f, "{} less/equal", com),
-            Greater(com) => write!(f, "{} greater", com),
-            GreaterEqual(com) => write!(f, "{} greater/equal", com),
-        }
-    }
-}
-
-impl Display for FlaggedOperation {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        use FlaggedOperation::*;
-
-        match self {
-            Add { a, b } => write!(f, "{} + {}", a, b),
-            Sub { a, b } => write!(f, "{} - {}", a, b),
-            Mul { a, b } => write!(f, "{} * {}", a, b),
-            And { a, b } => write!(f, "{} & {}", a, b),
-        }
     }
 }
 
@@ -683,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn binops() {
+    fn bin_ops() {
         // Instruction: add r8, qword ptr [rdi+0xa]
         // The microcode works as follows:
         // - Move r8 into t0
@@ -806,15 +711,15 @@ mod tests {
 
         let mut enc = MicroEncoder::new();
 
-        // Instruction: test eax, eax
-        test_with_encoder(&mut enc, &[0x85, 0xc0], "
+        // Instruction: cmp eax, eax
+        test_with_encoder(&mut enc, &[0x39, 0xc0], "
             mov T0:n32 = [m1][0x0:n32]
             mov T1:n32 = [m1][0x0:n32]
         ");
 
         // Instruction: setl al
         test_with_encoder(&mut enc, &[0x0f, 0x9c, 0xc0], "
-            set T2:n8 if T0:n32 & T1:n32 less
+            set T2:n8 if (T0:n32 < T1:n32 signed)
             mov [m1][0x0:n8] = T2:n8
         ");
     }
@@ -835,26 +740,19 @@ mod tests {
             mov T1:n32 = [m1][0x0:n32]
         ");
 
-
-        // Instruction: jg +0x9
-        test_with_encoder(&mut enc, &[0x7f, 0x09], "
-            const T2:n64 = 0x9:n64
-            jump by T2:n64 if T0:n32 & T1:n32 greater
-        ");
-
         // Instruction: sub rsp, 0x10
         test_with_encoder(&mut enc, &[0x48, 0x83, 0xec, 0x10], "
-            mov T3:n64 = [m1][0x20:n64]
-            const T4:n8 = 0x10:n8
-            cast T4:n8 to n64 signed
-            sub T5:n64 = T3:n64 - T4:n64
-            mov [m1][0x20:n64] = T5:n64
+            mov T2:n64 = [m1][0x20:n64]
+            const T3:n8 = 0x10:n8
+            cast T3:n8 to n64 signed
+            sub T4:n64 = T2:n64 - T3:n64
+            mov [m1][0x20:n64] = T4:n64
         ");
 
         // Instruction: je +0xe
         test_with_encoder(&mut enc, &[0x74, 0x0e], "
-            const T6:n64 = 0xe:n64
-            jump by T6:n64 if T3:n64 - T4:n64 equal
+            const T5:n64 = 0xe:n64
+            jump by T5:n64 if (T2:n64 == T3:n64)
         ");
 
         // Instruction: call -0x76

@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use crate::Program;
 use crate::x86_64::{Instruction, Mnemoic};
-use crate::ir::{Microcode, MicroEncoder, JumpCondition};
-use crate::math::{Integer, DataType, SymExpr, Solver};
+use crate::ir::{Microcode, MicroEncoder};
+use crate::math::{Integer, DataType, SymExpr, SymCondition, Solver};
 use crate::sym::{SymState, MemoryStrategy, Event};
 
 
@@ -20,7 +20,7 @@ pub struct FlowGraph {
     pub blocks: HashMap<u64, BasicBlock>,
     /// The control flow between the nodes. The key pairs are indices
     /// into the `nodes` vector.
-    pub edges: HashMap<(usize, usize), (JumpCondition, bool)>,
+    pub edges: HashMap<(usize, usize), SymCondition>,
     /// The nodes which the node with the index has edges to.
     pub incoming: Vec<Vec<usize>>,
     /// The nodes which have edges to the node with the index.
@@ -128,10 +128,10 @@ impl FlowGraph {
         // deterministic eventhough the hash map cannot be traversed in order.
         let mut edges = self.edges.iter().collect::<Vec<_>>();
         edges.sort_by_key(|edge| edge.0);
-        for ((start, end), &(condition, value)) in edges {
+        for ((start, end), condition) in edges {
             write!(f, "b{} -> b{} [", start, end)?;
-            if condition != JumpCondition::True {
-                write!(f, "label=\"[{}]\", ", condition.pretty_format(value))?;
+            if condition != &SymCondition::TRUE {
+                write!(f, "label=\"{}\", ", condition)?;
             }
             writeln!(f, "style=dashed, color=grey]")?;
         }
@@ -159,7 +159,7 @@ struct FlowConstructor<'a> {
     stack: Vec<(FlowNode, Vec<usize>, SymState)>,
     nodes: HashMap<FlowNode, usize>,
     blocks: HashMap<u64, BasicBlock>,
-    edges: HashMap<(usize, usize), (JumpCondition, bool)>,
+    edges: HashMap<(usize, usize), SymCondition>,
 }
 
 /// An exit of a block.
@@ -167,7 +167,7 @@ struct FlowConstructor<'a> {
 struct Exit {
     target: SymExpr,
     jumpsite: u64,
-    condition: JumpCondition,
+    condition: SymCondition,
     kind: ExitKind,
 }
 
@@ -265,7 +265,7 @@ impl<'a> FlowConstructor<'a> {
             let (addr, len, instruction, microcode) = parser.next();
 
             // Execute the microcode.
-            for &op in &microcode.ops {
+            for op in &microcode.ops {
                 // Do one single microcode step.
                 let next_addr = addr + len;
                 let maybe_event = state.step(next_addr, op);
@@ -326,13 +326,13 @@ impl<'a> FlowConstructor<'a> {
         match exit.target {
             SymExpr::Int(Integer(DataType::N64, target)) => {
                 // Try the not-jumping path if it is viable.
-                if exit.condition != JumpCondition::True {
+                if exit.condition != SymCondition::TRUE {
                     let len = self.blocks[&node.addr].len;
                     self.explore_acyclic(
                         node.addr + len,
                         exit.jumpsite,
                         exit.kind,
-                        (exit.condition, false),
+                        state.solver.simplify_condition(&exit.condition.clone().not()),
                         node.clone(),
                         path,
                         &state
@@ -344,7 +344,7 @@ impl<'a> FlowConstructor<'a> {
                     target,
                     exit.jumpsite,
                     exit.kind,
-                    (exit.condition, true),
+                    exit.condition,
                     node,
                     path,
                     &state
@@ -361,7 +361,7 @@ impl<'a> FlowConstructor<'a> {
         addr: u64,
         jumpsite: u64,
         kind: ExitKind,
-        condition: (JumpCondition, bool),
+        condition: SymCondition,
         node: FlowNode,
         path: &[usize],
         state: &SymState

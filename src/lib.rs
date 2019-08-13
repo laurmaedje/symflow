@@ -14,6 +14,7 @@ use crate::ir::{Microcode, MicroEncoder};
 #[macro_use]
 mod helper {
     use std::fmt::{self, Formatter};
+    use crate::math::DataType;
 
     pub fn write_signed_hex(f: &mut Formatter, value: i64) -> fmt::Result {
         if value >= 0 {
@@ -25,6 +26,13 @@ mod helper {
 
     pub fn signed_name(s: bool) -> &'static str {
         if s { "signed" } else { "unsigned" }
+    }
+
+    pub fn boxed<T>(value: T) -> Box<T> { Box::new(value) }
+
+    /// Make sure operations only happen on same expressions.
+    pub fn check_compatible(a: DataType, b: DataType, operation: &str) {
+        assert_eq!(a, b, "incompatible data types for {}", operation);
     }
 
     macro_rules! debug_display {
@@ -115,7 +123,7 @@ impl Display for Program {
             if f.alternate() && !first { writeln!(f)?; } first = false;
             writeln!(f, "    {:x}: {}", addr, instruction)?;
             if f.alternate() {
-                for &op in &microcode.ops {
+                for op in &microcode.ops {
                     writeln!(f, "         | {}", op)?;
                 }
             }

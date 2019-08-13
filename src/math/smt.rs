@@ -5,6 +5,7 @@ use std::fmt::{self, Display, Debug, Formatter};
 use z3::Context as Z3Context;
 use z3::ast::Ast;
 
+use crate::helper::boxed;
 use super::{SymExpr, SymCondition, SymDynamic, Symbol};
 use super::{Integer, DataType::*};
 use SymExpr::*;
@@ -28,25 +29,23 @@ impl Solver {
     }
 
     /// Simplify an expression.
-    pub fn simplify_expr(&self, expr: SymExpr) -> SymExpr {
+    pub fn simplify_expr(&self, expr: &SymExpr) -> SymExpr {
         let z3_expr = expr.to_z3_ast(&self.ctx);
         let params = self.params();
         let z3_simplified = z3_expr.simplify_ex(&params).simplify_ex(&params);
-        SymExpr::from_z3_ast(&z3_simplified).unwrap_or_else(|_| {
-            println!("warning: condition solver: failed to simplify expression: {}", expr);
-            expr
+        SymExpr::from_z3_ast(&z3_simplified).unwrap_or_else(|err| {
+            panic!("condition solver: failed to simplify expression: {}\n{}", expr, err);
         })
     }
 
     /// Simplify a condition.
-    pub fn simplify_condition(&self, cond: SymCondition) -> SymCondition {
+    pub fn simplify_condition(&self, cond: &SymCondition) -> SymCondition {
         if self.check_sat(&cond) {
             let z3_cond = cond.to_z3_ast(&self.ctx);
             let params = self.params();
             let z3_simplified = z3_cond.simplify_ex(&params).simplify_ex(&params);
-            SymCondition::from_z3_ast(&z3_simplified).unwrap_or_else(|_| {
-                println!("warning: condition solver: failed to simplify condition: {}", cond);
-                cond
+            SymCondition::from_z3_ast(&z3_simplified).unwrap_or_else(|err| {
+                panic!("warning: condition solver: failed to simplify condition: {}\n{}", cond, err);
             })
         } else {
             SymCondition::FALSE
@@ -152,8 +151,7 @@ impl<'a> Z3Parser<'a> {
                 match kind {
                     "zero_extend" | "sign_extend" => {
                         self.skip_white();
-                        let bits = self.parse_word_while(|c| c.is_digit(10)).parse::<usize>()
-                            .map_err(|_| "expected value for bit extension")?;
+                        let bits = self.parse_number()?;
 
                         self.expect(')')?;
                         self.skip_white();
@@ -170,7 +168,7 @@ impl<'a> Z3Parser<'a> {
             "bvmul" => self.parse_bv_varop(Mul)?,
             "bvand" => self.parse_bv_varop(BitAnd)?,
             "bvor"  => self.parse_bv_varop(BitOr)?,
-            "bvnot" => BitNot(boxed(self.parse_bitvec()?)),
+            "bvnot" => BitNot(self.bv()?),
 
             "ite" => {
                 let condition = self.parse_bool()?;
@@ -202,11 +200,11 @@ impl<'a> Z3Parser<'a> {
     /// Parse a bitvector function with variable number of arguments.
     fn parse_bv_varop<F>(&mut self, op: F) -> ParseResult<SymExpr>
     where F: Fn(Box<SymExpr>, Box<SymExpr>) -> SymExpr {
-        let mut expr = op(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?));
+        let mut expr = op(self.bv()?, self.bv()?);
 
         self.skip_white();
         while self.peek() != Some(')') {
-            expr = op(boxed(expr), boxed(self.parse_bitvec()?));
+            expr = op(boxed(expr), self.bv()?);
             self.skip_white();
         }
 
@@ -244,10 +242,11 @@ impl<'a> Z3Parser<'a> {
             "mem" => "mem",
             "reg" => "reg",
             "stdin" => "stdin",
+            "T" => "T",
             s => return err(format!("invalid space name for symbol: {:?}", s)),
         };
-        self.expect('-')?;
-        let index = self.parse_digit()?;
+
+        let index = self.parse_number()?;
 
         self.expect(':')?;
         self.expect('n')?;
@@ -284,24 +283,20 @@ impl<'a> Z3Parser<'a> {
     fn parse_bool_func(&mut self) -> ParseResult<SymCondition> {
         self.expect('(')?;
         let func = self.parse_func_name();
+        let signed = || func.chars().nth(2) == Some('s');
         let cond = match func {
             "let" => { self.parse_let_bindings()?; self.parse_bool()? },
 
-            "=" => Equal(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?)),
+            "=" => Equal(self.bv()?, self.bv()?),
 
-            "bvult" => LessThan(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), false),
-            "bvule" => LessEqual(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), false),
-            "bvugt" => GreaterThan(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), false),
-            "bvuge" => GreaterEqual(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), false),
+            "bvult" | "bvslt" => LessThan(self.bv()?, self.bv()?, signed()),
+            "bvule" | "bvsle" => LessEqual(self.bv()?, self.bv()?, signed()),
+            "bvugt" | "bvsgt" => GreaterThan(self.bv()?, self.bv()?, signed()),
+            "bvuge" | "bvsge" => GreaterEqual(self.bv()?, self.bv()?, signed()),
 
-            "bvslt" => LessThan(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), true),
-            "bvsle" => LessEqual(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), true),
-            "bvsgt" => GreaterThan(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), true),
-            "bvsge" => GreaterEqual(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), true),
-
-            "and" => And(boxed(self.parse_bool()?), boxed(self.parse_bool()?)),
-            "or" => Or(boxed(self.parse_bool()?), boxed(self.parse_bool()?)),
-            "not" => Not(boxed(self.parse_bool()?)),
+            "and" => And(self.bl()?, self.bl()?),
+            "or" => Or(self.bl()?, self.bl()?),
+            "not" => Not(self.bl()?),
 
             _ => return err(format!("unknown boolean function: {:?}", func)),
         };
@@ -320,9 +315,16 @@ impl<'a> Z3Parser<'a> {
 
             let name = self.parse_ident();
 
+            let active = self.active;
+            let ast = self.ast;
+
             let value = match self.parse_bitvec() {
                 Ok(bitvec) => bitvec.into(),
-                Err(_) => self.parse_bool()?.into(),
+                Err(_) => {
+                    self.active = active;
+                    self.ast = ast;
+                    self.parse_bool()?.into()
+                },
             };
             self.bindings.insert(name.to_string(), value);
 
@@ -347,6 +349,16 @@ impl<'a> Z3Parser<'a> {
                 None => err(format!("let binding with name {:?} does not exist", name))
             }
         }
+    }
+
+    /// Parse the next boxed boolean.
+    fn bl(&mut self) -> ParseResult<Box<SymCondition>> {
+        self.parse_bool().map(boxed)
+    }
+
+    /// Parse the next boxed bitvec.
+    fn bv(&mut self) -> ParseResult<Box<SymExpr>> {
+        self.parse_bitvec().map(boxed)
     }
 
     /// Return everything until the next whitespace or parens.
@@ -375,11 +387,9 @@ impl<'a> Z3Parser<'a> {
     }
 
     /// Try to parse a digit from the first letter.
-    fn parse_digit(&mut self) -> ParseResult<usize> {
-        match self.next() {
-            Some(c @ ('0' ..= '9')) => Ok((c as usize) - ('0' as usize)),
-            _ => err("expected digit"),
-        }
+    fn parse_number(&mut self) -> ParseResult<usize> {
+        let word = self.parse_word_while(|c| c.is_digit(10));
+        word.parse::<usize>().map_err(|_| format!("{:?} is not a valid number", word))
     }
 
     /// Skip leading whitespace.
@@ -436,8 +446,6 @@ fn err<T, S: Into<String>>(message: S) -> ParseResult<T> {
     Err(message.into())
 }
 
-fn boxed<T>(value: T) -> Box<T> { Box::new(value) }
-
 
 /// The error type for decoding a Z3 Ast into a symbolic expression/condition.
 pub struct FromAstError {
@@ -456,7 +464,6 @@ impl FromAstError {
     }
 }
 
-impl std::error::Error for FromAstError {}
 impl Display for FromAstError {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         writeln!(f, "Failed to parse Z3 value at index {}: {} [", self.index, self.message)?;
@@ -467,8 +474,5 @@ impl Display for FromAstError {
     }
 }
 
-impl Debug for FromAstError {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        Display::fmt(self, f)
-    }
-}
+impl std::error::Error for FromAstError {}
+debug_display!(FromAstError);

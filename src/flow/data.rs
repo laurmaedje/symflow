@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::rc::Rc;
 
-use crate::math::{Integer, DataType, SymExpr, SymCondition, SharedSolver, Solver};
+use crate::math::{Integer, DataType, SymExpr, SymCondition, SharedSolver, Solver, Traversed};
 use crate::sym::{SymState, MemoryStrategy, SymbolMap, TypedMemoryAccess};
 use super::FlowGraph;
 use DataType::*;
@@ -59,35 +59,38 @@ impl<'g> DataflowExplorer<'g> {
                 let access = get_access_addr(addr, &state);
 
                 if addr == target_addr {
-                    let access_mem = access.expect(
-                        "find_direct_data_flow: expected access at target address");
+                    let err = "find_direct_data_flow: expected access at target address";
+                    let access_mem = access.expect(err);
                     target_mem = Some(access_mem);
-                } else {
-                    if let Some(access_mem) = access {
-                        let aliasing = if let Some(target_mem) = target_mem.as_ref() {
-                            self.determine_aliasing_condition(target_mem, &access_mem)
-                        } else {
-                            SymCondition::FALSE
-                        };
 
-                        let local_condition = pre.clone().and(aliasing);
+                } else if let Some(access_mem) = access {
+                    let aliasing = if let Some(target_mem) = target_mem.as_ref() {
+                        self.determine_aliasing_condition(target_mem, &access_mem)
+                    } else {
+                        SymCondition::FALSE
+                    };
 
-                        let condition = self.solver.simplify_condition(match map.remove(&addr) {
-                            Some((previous, _)) => previous.or(local_condition),
-                            None => local_condition,
-                        });
+                    let local_condition = pre.clone().and(aliasing);
 
-                        let symbols = state.symbol_map.iter()
-                            .filter(|&(symbol, _)| condition.contains_symbol(*symbol))
-                            .map(|(&sym, loc)| (sym, loc.clone()))
-                            .collect();
+                    let condition = self.solver.simplify_condition(&match map.remove(&addr) {
+                        Some((previous, _)) => previous.or(local_condition),
+                        None => local_condition,
+                    });
 
-                        map.insert(addr, (condition, symbols));
-                    }
+                    let mut symbols = HashMap::new();
+                    condition.traverse(&mut |node| {
+                        if let Traversed::Expr(&SymExpr::Sym(symbol)) = node {
+                            if let Some(loc) = state.symbol_map.get(&symbol) {
+                                symbols.insert(symbol, loc.clone());
+                            }
+                        }
+                    });
+
+                    map.insert(addr, (condition, symbols));
                 }
 
                 // Execute the microcode for the instruction.
-                for &op in &microcode.ops {
+                for op in &microcode.ops {
                     state.step(next_addr, op);
                 }
             }
@@ -95,12 +98,9 @@ impl<'g> DataflowExplorer<'g> {
             // Add all nodes reachable from that one as targets.
             for &id in &self.graph.outgoing[target] {
                 if relevant.contains(&id) {
-                    let (condition, value) = self.graph.edges[&(target, id)];
-                    let mut evaluated = state.evaluate(condition);
-                    if !value {
-                        evaluated = evaluated.not();
-                    }
-                    let new_pre = self.solver.simplify_condition(pre.clone().and(evaluated));
+                    let condition = &self.graph.edges[&(target, id)];
+                    let evaluated = state.evaluate_condition(condition);
+                    let new_pre = self.solver.simplify_condition(&pre.clone().and(evaluated));
                     targets.push((id, new_pre, state.clone(), target_mem.clone()));
                 }
             }
@@ -130,7 +130,7 @@ impl<'g> DataflowExplorer<'g> {
             (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
         };
 
-        self.solver.simplify_condition(condition)
+        self.solver.simplify_condition(&condition)
     }
 
     /// Find all reachable nodes for this flow analysis by walking through the
@@ -214,7 +214,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn flow_map_bufs_1() {
+    fn flow_map_1() {
         let program = Program::new("target/bin/bufs-1");
         let graph = FlowGraph::new(&program);
 
@@ -234,13 +234,13 @@ mod tests {
 
         // Ascii 'z' is 122 and ':' is 58, so the difference is exactly 64.
         // This is the only difference that should satisfy the flow condition.
-        assert!(secret_flow_condition.evaluate_with(|symbol| match symbol {
+        assert!(secret_flow_condition.evaluate(&|symbol| match symbol {
             Symbol(N8, "stdin", 0) => Some(Integer(N8, 'z' as u64)),
             Symbol(N8, "stdin", 1) => Some(Integer(N8, ':' as u64)),
             _ => None,
         }));
 
-        assert!(!secret_flow_condition.evaluate_with(|symbol| match symbol {
+        assert!(!secret_flow_condition.evaluate(&|symbol| match symbol {
             Symbol(N8, "stdin", 0) => Some(Integer(N8, 'a' as u64)),
             Symbol(N8, "stdin", 1) => Some(Integer(N8, 'p' as u64)),
             _ => None,
@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn flow_map_bufs_2() {
+    fn flow_map_2() {
         let program = Program::new("target/bin/bufs-2");
         let graph = FlowGraph::new(&program);
 
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn flow_map_bufs_3() {
+    fn flow_map_3() {
         let program = Program::new("target/bin/bufs-3");
         let graph = FlowGraph::new(&program);
 
