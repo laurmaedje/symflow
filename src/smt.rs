@@ -286,15 +286,21 @@ impl<'a> Z3Parser<'a> {
         let func = self.parse_func_name();
         let cond = match func {
             "let" => { self.parse_let_bindings()?; self.parse_bool()? },
+
             "=" => Equal(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?)),
 
-            "bvult" => Less(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?)),
-            "bvule" => LessEqual(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?)),
-            "bvugt" => Greater(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?)),
-            "bvuge" => GreaterEqual(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?)),
+            "bvult" => LessThan(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), false),
+            "bvule" => LessEqual(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), false),
+            "bvugt" => GreaterThan(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), false),
+            "bvuge" => GreaterEqual(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), false),
+
+            "bvslt" => LessThan(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), true),
+            "bvsle" => LessEqual(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), true),
+            "bvsgt" => GreaterThan(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), true),
+            "bvsge" => GreaterEqual(boxed(self.parse_bitvec()?), boxed(self.parse_bitvec()?), true),
 
             "and" => And(boxed(self.parse_bool()?), boxed(self.parse_bool()?)),
-            "or" => And(boxed(self.parse_bool()?), boxed(self.parse_bool()?)),
+            "or" => Or(boxed(self.parse_bool()?), boxed(self.parse_bool()?)),
             "not" => Not(boxed(self.parse_bool()?)),
 
             _ => return err(format!("unknown boolean function: {:?}", func)),

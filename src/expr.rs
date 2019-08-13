@@ -31,10 +31,11 @@ pub enum SymExpr {
 pub enum SymCondition {
     Bool(bool),
     Equal(Box<SymExpr>, Box<SymExpr>),
-    Less(Box<SymExpr>, Box<SymExpr>),
-    LessEqual(Box<SymExpr>, Box<SymExpr>),
-    Greater(Box<SymExpr>, Box<SymExpr>),
-    GreaterEqual(Box<SymExpr>, Box<SymExpr>),
+    /// If the bool is true, the operation is signed.
+    LessThan(Box<SymExpr>, Box<SymExpr>, bool),
+    LessEqual(Box<SymExpr>, Box<SymExpr>, bool),
+    GreaterThan(Box<SymExpr>, Box<SymExpr>, bool),
+    GreaterEqual(Box<SymExpr>, Box<SymExpr>, bool),
     And(Box<SymCondition>, Box<SymCondition>),
     Or(Box<SymCondition>, Box<SymCondition>),
     Not(Box<SymCondition>),
@@ -57,11 +58,11 @@ fn check_compatible(a: DataType, b: DataType, operation: &str) {
 }
 
 macro_rules! bin_expr {
-    ($func:ident, $op:tt, $variant:ident) => {
+    ($func:ident,$variant:ident) => {
         pub fn $func(self, other: SymExpr) -> SymExpr {
             check_compatible(self.data_type(), other.data_type(), "operation");
             match (self, other) {
-                (Int(a), Int(b)) => Int(a $op b),
+                (Int(a), Int(b)) => Int(a.$func(b)),
                 (a, b) => $variant(Box::new(a), Box::new(b)),
             }
         }
@@ -74,9 +75,9 @@ macro_rules! bin_expr_simplifying {
             check_compatible(self.data_type(), other.data_type(), "operation");
             fn add_or_sub(expr: SymExpr, a: Integer, b: Integer) -> SymExpr {
                 if a.flagged_sub(b).1.sign {
-                    Sub(boxed(expr), boxed(Int(b - a)))
+                    Sub(boxed(expr), boxed(Int(b.sub(a))))
                 } else {
-                    Add(boxed(expr), boxed(Int(a - b)))
+                    Add(boxed(expr), boxed(Int(a.sub(b))))
                 }
             }
             let $a = self;
@@ -86,17 +87,13 @@ macro_rules! bin_expr_simplifying {
     };
 }
 
-macro_rules! z3_binop {
-    ($ctx:expr, $a:expr, $b:expr, $op:ident) => { $a.to_z3_ast($ctx).$op(&$b.to_z3_ast($ctx)) };
-}
-
-macro_rules! cmp_expr {
-    ($func:ident, $op:ident, $variant:ident) => {
-        pub fn $func(self, other: SymExpr) -> SymCondition {
+macro_rules! cmp_maybe_signed {
+    ($func:ident, $variant:ident) => {
+        pub fn $func(self, other: SymExpr, signed: bool) -> SymCondition {
             check_compatible(self.data_type(), other.data_type(), "comparison");
             match (self, other) {
-                (Int(a), Int(b)) => Bool(a.$op(&b)),
-                (a, b) => $variant(Box::new(a), Box::new(b)),
+                (Int(a), Int(b)) => Bool(a.$func(b, signed)),
+                (a, b) => $variant(Box::new(a), Box::new(b), signed),
             }
         }
     };
@@ -107,6 +104,11 @@ macro_rules! contains {
         $($exprs.contains_symbol($symbol) ||)* false
     };
 }
+
+macro_rules! z3_binop {
+    ($ctx:expr, $a:expr, $b:expr, $op:ident) => { $a.to_z3_ast($ctx).$op(&$b.to_z3_ast($ctx)) };
+}
+
 
 impl SymExpr {
     /// Create a new integer expression.
@@ -131,12 +133,12 @@ impl SymExpr {
             Int(int) => *int,
             Sym(sym) => symbols(*sym)
                 .unwrap_or_else(|| panic!("evaluate_inner: missing symbol: {}", sym)),
-            Add(a, b)    => a.evaluate_inner(symbols) + b.evaluate_inner(symbols),
-            Sub(a, b)    => a.evaluate_inner(symbols) - b.evaluate_inner(symbols),
-            Mul(a, b)    => a.evaluate_inner(symbols) * b.evaluate_inner(symbols),
-            BitAnd(a, b) => a.evaluate_inner(symbols) & b.evaluate_inner(symbols),
-            BitOr(a, b)  => a.evaluate_inner(symbols) | b.evaluate_inner(symbols),
-            BitNot(a)    => !a.evaluate_inner(symbols),
+            Add(a, b)    => a.evaluate_inner(symbols).add(b.evaluate_inner(symbols)),
+            Sub(a, b)    => a.evaluate_inner(symbols).sub(b.evaluate_inner(symbols)),
+            Mul(a, b)    => a.evaluate_inner(symbols).mul(b.evaluate_inner(symbols)),
+            BitAnd(a, b) => a.evaluate_inner(symbols).bitand(b.evaluate_inner(symbols)),
+            BitOr(a, b)  => a.evaluate_inner(symbols).bitor(b.evaluate_inner(symbols)),
+            BitNot(a)    => a.evaluate_inner(symbols).bitnot(),
             Cast(a, data_type, signed) => a.evaluate_inner(symbols).cast(*data_type, *signed),
             AsExpr(a, data_type)  => Integer::from_bool(a.evaluate_inner(symbols), *data_type),
             IfThenElse(c, a, b) => if c.evaluate_inner(symbols) {
@@ -229,59 +231,6 @@ impl SymExpr {
         }
     }
 
-    // Add and simplify.
-    bin_expr_simplifying!(add, a, b, match (a, b) {
-        (a, Int(Integer(_, 0))) | (Int(Integer(_, 0)), a) => a,
-        (Int(a), Int(b)) => Int(a + b),
-        (Int(a), Add(b, c)) | (Add(b, c), Int(a)) => match (*b, *c) {
-            (Int(b), c) | (c, Int(b)) => Add(boxed(c), boxed(Int(a + b))),
-            (b, c) => Add(boxed(Int(a)), boxed(Add(boxed(b), boxed(c)))),
-        },
-        (Int(a), Sub(b, c)) | (Sub(b, c), Int(a)) => match (*b, *c) {
-            (b, Int(c)) => add_or_sub(b, a, c),
-            (Int(b), c) => Sub(boxed(Int(a + b)), boxed(c)),
-            (b, c) => Add(boxed(Int(a)), boxed(Sub(boxed(b), boxed(c))))
-        }
-        (a, b) => Add(boxed(a), boxed(b)),
-    });
-
-    // Subtract and simplify.
-    bin_expr_simplifying!(sub, a, b, match (a, b) {
-        (a, Int(Integer(_, 0))) | (Int(Integer(_, 0)), a) => a,
-        (Int(a), Int(b)) => Int(a - b),
-        (Int(a), Sub(b, c)) => match (*b, *c) {
-            (Int(b), c) => add_or_sub(c, a, b),
-            (b, Int(c)) => Sub(boxed(Int(a + c)), boxed(b)),
-            (b, c) => Sub(boxed(Int(a)), boxed(Sub(boxed(b), boxed(c)))),
-        },
-        (Sub(a, b), Int(c)) => match (*a, *b) {
-            (Int(a), b) => Sub(boxed(Int(a - c)), boxed(b)),
-            (a, Int(b)) => Sub(boxed(a), boxed(Int(b + c))),
-            (a, b) => Sub(boxed(Sub(boxed(a), boxed(b))), boxed(Int(c))),
-        },
-        (Int(a), Add(b, c)) => match (*b, *c) {
-            (Int(b), c) => Sub(boxed(Int(a - b)), boxed(c)),
-            (b, Int(c)) => Sub(boxed(Int(a + c)), boxed(b)),
-            (b, c) => Sub(boxed(Int(a)), boxed(Sub(boxed(b), boxed(c)))),
-        },
-        (Add(a, b), Int(c)) => match (*a, *b) {
-            (Int(a), b) | (b, Int(a)) => add_or_sub(b, a, c),
-            (a, b) => Sub(boxed(Sub(boxed(a), boxed(b))), boxed(Int(c))),
-        }
-        (a, b) => Sub(boxed(a), boxed(b)),
-    });
-
-    bin_expr!(mul, *, Mul);
-    bin_expr!(bit_and, &, BitAnd);
-    bin_expr!(bit_or, *, BitOr);
-
-    pub fn bit_not(self) -> SymExpr {
-        match self {
-            Int(x) => Int(!x),
-            x => BitNot(Box::new(x)),
-        }
-    }
-
     pub fn cast(self, new: DataType, signed: bool) -> SymExpr {
         match self {
             Int(x) => Int(x.cast(new, signed)),
@@ -298,11 +247,71 @@ impl SymExpr {
         }
     }
 
-    cmp_expr!(equal, eq, Equal);
-    cmp_expr!(less, lt, Less);
-    cmp_expr!(less_equal, le, LessEqual);
-    cmp_expr!(greater, gt, Greater);
-    cmp_expr!(greater_equal, ge, GreaterEqual);
+    // Add and simplify.
+    bin_expr_simplifying!(add, a, b, match (a, b) {
+        (a, Int(Integer(_, 0))) | (Int(Integer(_, 0)), a) => a,
+        (Int(a), Int(b)) => Int(a.add(b)),
+        (Int(a), Add(b, c)) | (Add(b, c), Int(a)) => match (*b, *c) {
+            (Int(b), c) | (c, Int(b)) => Add(boxed(c), boxed(Int(a.add(b)))),
+            (b, c) => Add(boxed(Int(a)), boxed(Add(boxed(b), boxed(c)))),
+        },
+        (Int(a), Sub(b, c)) | (Sub(b, c), Int(a)) => match (*b, *c) {
+            (b, Int(c)) => add_or_sub(b, a, c),
+            (Int(b), c) => Sub(boxed(Int(a.add(b))), boxed(c)),
+            (b, c) => Add(boxed(Int(a)), boxed(Sub(boxed(b), boxed(c))))
+        }
+        (a, b) => Add(boxed(a), boxed(b)),
+    });
+
+    // Subtract and simplify.
+    bin_expr_simplifying!(sub, a, b, match (a, b) {
+        (a, Int(Integer(_, 0))) | (Int(Integer(_, 0)), a) => a,
+        (Int(a), Int(b)) => Int(a.sub(b)),
+        (Int(a), Sub(b, c)) => match (*b, *c) {
+            (Int(b), c) => add_or_sub(c, a, b),
+            (b, Int(c)) => Sub(boxed(Int(a.add(c))), boxed(b)),
+            (b, c) => Sub(boxed(Int(a)), boxed(Sub(boxed(b), boxed(c)))),
+        },
+        (Sub(a, b), Int(c)) => match (*a, *b) {
+            (Int(a), b) => Sub(boxed(Int(a.sub(c))), boxed(b)),
+            (a, Int(b)) => Sub(boxed(a), boxed(Int(b.add(c)))),
+            (a, b) => Sub(boxed(Sub(boxed(a), boxed(b))), boxed(Int(c))),
+        },
+        (Int(a), Add(b, c)) => match (*b, *c) {
+            (Int(b), c) => Sub(boxed(Int(a.sub(b))), boxed(c)),
+            (b, Int(c)) => Sub(boxed(Int(a.add(c))), boxed(b)),
+            (b, c) => Sub(boxed(Int(a)), boxed(Add(boxed(b), boxed(c)))),
+        },
+        (Add(a, b), Int(c)) => match (*a, *b) {
+            (Int(a), b) | (b, Int(a)) => add_or_sub(b, a, c),
+            (a, b) => Sub(boxed(Add(boxed(a), boxed(b))), boxed(Int(c))),
+        }
+        (a, b) => Sub(boxed(a), boxed(b)),
+    });
+
+    bin_expr!(mul, Mul);
+    bin_expr!(bitand, BitAnd);
+    bin_expr!(bitor, BitOr);
+
+    pub fn bitnot(self) -> SymExpr {
+        match self {
+            Int(x) => Int(x.bitnot()),
+            x => BitNot(Box::new(x)),
+        }
+    }
+
+    pub fn equal(self, other: SymExpr) -> SymCondition {
+        check_compatible(self.data_type(), other.data_type(), "comparison");
+        match (self, other) {
+            (Int(a), Int(b)) => Bool(a.equal(&b)),
+            (a, b) => Equal(Box::new(a), Box::new(b)),
+        }
+    }
+
+    cmp_maybe_signed!(less_than, LessThan);
+    cmp_maybe_signed!(less_equal, LessEqual);
+    cmp_maybe_signed!(greater_than, GreaterThan);
+    cmp_maybe_signed!(greater_equal, GreaterEqual);
 }
 
 macro_rules! bin_cond  {
@@ -330,11 +339,11 @@ impl SymCondition {
     where S: Fn(Symbol) -> Option<Integer> {
         match self {
             Bool(b) => *b,
-            Equal(a, b)        => a.evaluate_inner(symbols) == b.evaluate_inner(symbols),
-            Less(a, b)         => a.evaluate_inner(symbols) < b.evaluate_inner(symbols),
-            LessEqual(a, b)    => a.evaluate_inner(symbols) <= b.evaluate_inner(symbols),
-            Greater(a, b)      => a.evaluate_inner(symbols) > b.evaluate_inner(symbols),
-            GreaterEqual(a, b) => a.evaluate_inner(symbols) >= b.evaluate_inner(symbols),
+            Equal(a, b) => a.evaluate_inner(symbols) == b.evaluate_inner(symbols),
+            LessThan(a, b, s)     => a.evaluate_inner(symbols).less_than(b.evaluate_inner(symbols), *s),
+            LessEqual(a, b, s)    => a.evaluate_inner(symbols).less_equal(b.evaluate_inner(symbols), *s),
+            GreaterThan(a, b, s)  => a.evaluate_inner(symbols).greater_than(b.evaluate_inner(symbols), *s),
+            GreaterEqual(a, b, s) => a.evaluate_inner(symbols).greater_equal(b.evaluate_inner(symbols), *s),
             And(a, b) => a.evaluate_inner(symbols) && b.evaluate_inner(symbols),
             Or(a, b)  => a.evaluate_inner(symbols) && b.evaluate_inner(symbols),
             Not(a)    => !a.evaluate_inner(symbols),
@@ -345,11 +354,11 @@ impl SymCondition {
     pub fn contains_symbol(&self, symbol: Symbol) -> bool {
         match self {
             Bool(_) => false,
-            Equal(a, b)        => contains!(symbol, a, b),
-            Less(a, b)         => contains!(symbol, a, b),
-            LessEqual(a, b)    => contains!(symbol, a, b),
-            Greater(a, b)      => contains!(symbol, a, b),
-            GreaterEqual(a, b) => contains!(symbol, a, b),
+            Equal(a, b) => contains!(symbol, a, b),
+            LessThan(a, b, _)     => contains!(symbol, a, b),
+            LessEqual(a, b, _)    => contains!(symbol, a, b),
+            GreaterThan(a, b, _)  => contains!(symbol, a, b),
+            GreaterEqual(a, b, _) => contains!(symbol, a, b),
             And(a, b) => contains!(symbol, a, b),
             Or(a, b)  => contains!(symbol, a, b),
             Not(a)    => contains!(symbol, a),
@@ -368,11 +377,17 @@ impl SymCondition {
         match self {
             Bool(b) => Z3Bool::from_bool(ctx, *b),
 
-            Equal(a, b)        => z3_binop!(ctx, a, b, _eq),
-            Less(a, b)         => z3_binop!(ctx, a, b, bvult),
-            LessEqual(a, b)    => z3_binop!(ctx, a, b, bvule),
-            Greater(a, b)      => z3_binop!(ctx, a, b, bvugt),
-            GreaterEqual(a, b) => z3_binop!(ctx, a, b, bvuge),
+            Equal(a, b) => z3_binop!(ctx, a, b, _eq),
+
+            LessThan(a, b, false)         => z3_binop!(ctx, a, b, bvult),
+            LessEqual(a, b, false)    => z3_binop!(ctx, a, b, bvule),
+            GreaterThan(a, b, false)      => z3_binop!(ctx, a, b, bvugt),
+            GreaterEqual(a, b, false) => z3_binop!(ctx, a, b, bvuge),
+
+            LessThan(a, b, true)          => z3_binop!(ctx, a, b, bvslt),
+            LessEqual(a, b, true)     => z3_binop!(ctx, a, b, bvsle),
+            GreaterThan(a, b, true)       => z3_binop!(ctx, a, b, bvsgt),
+            GreaterEqual(a, b, true)  => z3_binop!(ctx, a, b, bvsge),
 
             And(a, b) => a.to_z3_ast(ctx).and(&[&b.to_z3_ast(ctx)]),
             Or(a, b)  => a.to_z3_ast(ctx).or(&[&b.to_z3_ast(ctx)]),
@@ -434,13 +449,14 @@ impl Display for SymExpr {
 
 impl Display for SymCondition {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        fn signed(s: bool) -> &'static str { if s { "signed" } else { "unsigned" } }
         match self {
             Bool(b) => write!(f, "{}", b),
             Equal(a, b) => write!(f, "({} == {})", a, b),
-            Less(a, b) => write!(f, "({} < {})", a, b),
-            LessEqual(a, b) => write!(f, "({} <= {})", a, b),
-            Greater(a, b) => write!(f, "({} > {})", a, b),
-            GreaterEqual(a, b) => write!(f, "({} >= {})", a, b),
+            LessThan(a, b, s) => write!(f, "({} < {} {})", a, b, signed(*s)),
+            LessEqual(a, b, s) => write!(f, "({} <= {} {})", a, b, signed(*s)),
+            GreaterThan(a, b, s) => write!(f, "({} > {} {})", a, b, signed(*s)),
+            GreaterEqual(a, b, s) => write!(f, "({} >= {} {})", a, b, signed(*s)),
             And(a, b) => write!(f, "({} and {})", a, b),
             Or(a, b) => write!(f, "({} or {})", a, b),
             Not(a) => write!(f, "(not {})", a),
@@ -497,7 +513,7 @@ mod tests {
 
         assert_eq!(simple_expr, n(15).add(n(2).mul(x())));
 
-        let expr = n(10).add(x()).add(n(20)).bit_or(z()).sub(n(3)).mul(n(40));
+        let expr = n(10).add(x()).add(n(20)).bitor(z()).sub(n(3)).mul(n(40));
         assert_eq!(expr, SymExpr::from_z3_ast(&expr.to_z3_ast(&ctx)).unwrap());
     }
 }

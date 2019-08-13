@@ -4,6 +4,7 @@ use std::fmt::{self, Debug, Display, Formatter};
 
 use crate::x86_64::{Instruction, Mnemoic, Operand, Register};
 use crate::num::{Integer, DataType};
+use Register::*;
 
 
 /// A sequence of micro operations.
@@ -102,15 +103,18 @@ impl MicroEncoder {
                 if dest.data_type() != src.data_type() {
                     self.ops.clear();
                     self.temps = 0;
-                    self.encode_move_casted(inst, true)?;
+                    self.encode_move_casted(inst.operands[0], inst.operands[1], true)?;
                 } else {
                     self.encode_move(dest, src)?;
                 }
             },
 
             // Load the source, cast it to the destination type and move it there.
-            Movzx => self.encode_move_casted(inst, false)?,
-            Movsx => self.encode_move_casted(inst, true)?,
+            Movzx => self.encode_move_casted(inst.operands[0], inst.operands[1], false)?,
+            Movsx => self.encode_move_casted(inst.operands[0], inst.operands[1], true)?,
+
+            Cwde => self.encode_move_casted(Operand::Direct(EAX), Operand::Direct(AX), true)?,
+            Cdqe => self.encode_move_casted(Operand::Direct(RAX), Operand::Direct(EAX), true)?,
 
             // Retrieve both locations, but instead of loading just move the
             // address into the destination.
@@ -138,6 +142,7 @@ impl MicroEncoder {
             // Jump to the first operand under specific conditions.
             Jmp => self.encode_jump(inst, JumpCondition::True),
             Je => self.encode_comp_jump(inst, JumpCondition::Equal)?,
+            Jbe => self.encode_comp_jump(inst, JumpCondition::BelowEqual)?,
             Jl => self.encode_comp_jump(inst, JumpCondition::Less)?,
             Jle => self.encode_comp_jump(inst, JumpCondition::LessEqual)?,
             Jg => self.encode_comp_jump(inst, JumpCondition::Greater)?,
@@ -370,9 +375,9 @@ impl MicroEncoder {
     }
 
     /// Encode moving with a cast to the destination source type.
-    fn encode_move_casted(&mut self, inst: &Instruction, signed: bool) -> EncoderResult<()> {
-        let dest = self.encode_get_location(inst.operands[0]);
-        let (_, mut temp) = self.encode_load_operand(inst.operands[1]);
+    fn encode_move_casted(&mut self, dest: Operand, src: Operand, signed: bool) -> EncoderResult<()> {
+        let dest = self.encode_get_location(dest);
+        let (_, mut temp) = self.encode_load_operand(src);
         let new = dest.data_type();
         self.ops.push(MicroOperation::Cast { target: temp, new, signed });
         temp.0 = new;
@@ -491,6 +496,14 @@ pub enum JumpCondition {
     True,
     /// Jump if equal (zero flag = 1).
     Equal(FlaggedOperation),
+    /// Jump if below (carry flag = 1).
+    Below(FlaggedOperation),
+    /// Jump if below or equal (carry flag = 1 or zero flag = 1).
+    BelowEqual(FlaggedOperation),
+    /// Jump if above (carry flag = 0 and zero flag = 0).
+    Above(FlaggedOperation),
+    /// Jump if above or equal (carry flag = 0).
+    AboveEqual(FlaggedOperation),
     /// Jump if less (sign flag ≠ overflow flag).
     Less(FlaggedOperation),
     /// Jump if less or equal (zero flag = 1 or sign flag ≠ overflow flag).
@@ -525,19 +538,29 @@ impl JumpCondition {
 
             (Equal(Sub { a, b }), true) => format!("T{} = T{}", a.1, b.1),
             (Equal(Sub { a, b }), false) => format!("T{} != T{}", a.1, b.1),
+
+            (Below(Sub { a, b }), true) | (AboveEqual(Sub { a, b }), false)
+                => format!("T{} < T{} unsigned", a.1, b.1),
+            (BelowEqual(Sub { a, b }), true) | (Above(Sub { a, b }), false)
+                => format!("T{} <= T{} unsigned", a.1, b.1),
+            (Above(Sub { a, b }), true) | (BelowEqual(Sub { a, b }), false)
+                => format!("T{} > T{} unsigned", a.1, b.1),
+            (AboveEqual(Sub { a, b }), true) | (Below(Sub { a, b }), false)
+                => format!("T{} >= T{} unsigned", a.1, b.1),
+
             (Less(Sub { a, b }), true) | (GreaterEqual(Sub { a, b }), false)
-                => format!("T{} < T{}", a.1, b.1),
+                => format!("T{} < T{} signed", a.1, b.1),
             (LessEqual(Sub { a, b }), true) | (Greater(Sub { a, b }), false)
-                => format!("T{} <= T{}", a.1, b.1),
+                => format!("T{} <= T{} signed", a.1, b.1),
             (Greater(Sub { a, b }), true) | (LessEqual(Sub { a, b }), false)
-                => format!("T{} > T{}", a.1, b.1),
+                => format!("T{} > T{} signed", a.1, b.1),
             (GreaterEqual(Sub { a, b }), true) | (Less(Sub { a, b }), false)
-                => format!("T{} >= T{}", a.1, b.1),
+                => format!("T{} >= T{} signed", a.1, b.1),
 
             (Equal(And { a, b }), true) => format!("T{} & T{} = 0", a.1, b.1),
             (Equal(And { a, b }), false) => format!("T{} & T{} != 0", a.1, b.1),
 
-            _ => panic!("pretty_format: unhandled condition/operation/value triple"),
+            p => panic!("pretty_format: unhandled condition/operation/value triple: {:?}", p),
         }
     }
 }
@@ -547,6 +570,10 @@ impl Display for JumpCondition {
         match self {
             JumpCondition::True => write!(f, "true"),
             JumpCondition::Equal(com) => write!(f, "{} equal", com),
+            JumpCondition::Below(com) => write!(f, "{} below", com),
+            JumpCondition::BelowEqual(com) => write!(f, "{} below/equal", com),
+            JumpCondition::Above(com) => write!(f, "{} above", com),
+            JumpCondition::AboveEqual(com) => write!(f, "{} above/equal", com),
             JumpCondition::Less(com) => write!(f, "{} less", com),
             JumpCondition::LessEqual(com) => write!(f, "{} less/equal", com),
             JumpCondition::Greater(com) => write!(f, "{} greater", com),
@@ -575,7 +602,6 @@ pub trait MemoryMapped {
 impl MemoryMapped for Register {
     /// Address of a register in the register memory space.
     fn address(&self) -> u64 {
-        use Register::*;
         match self {
             AL | AX | EAX | RAX => 0x00,
             CL | CX | ECX | RCX => 0x08,

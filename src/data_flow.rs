@@ -36,14 +36,18 @@ impl<'g> DataflowExplorer<'g> {
         // Find all nodes that can be backwards reached from first or second to
         // narrow down the search.
         let relevant = self.find_reachable_nodes(target_addr);
-        let mut map = HashMap::new();
+        let mut map = HashMap::<u64, (SymCondition, SymbolMap)>::new();
 
-        // Start the simulation at the entry node (index 0).
+        // Start the simulation
+        // - at the entry node (index 0)
+        // - with no pre conditions (these are generated at conditional jumps)
+        // - a blank state
+        // - no address yet for the target access
         let base_state = SymState::new(MemoryStrategy::ConditionalTrees, self.solver.clone());
-        let mut targets = vec![(0, base_state, None)];
+        let mut targets = vec![(0, SymCondition::TRUE, base_state, None)];
 
         // Explore the relevant part of the flow graph in search of the memory accesses.
-        while let Some((target, mut state, mut target_mem)) = targets.pop() {
+        while let Some((target, pre, mut state, mut target_mem)) = targets.pop() {
             let node = &self.graph.nodes[target];
             let block = &self.graph.blocks[&node.addr];
 
@@ -62,11 +66,18 @@ impl<'g> DataflowExplorer<'g> {
                     target_mem = Some(access_mem);
                 } else {
                     if let Some(access_mem) = access {
-                        let condition = if let Some(target_mem) = target_mem.as_ref() {
+                        let aliasing = if let Some(target_mem) = target_mem.as_ref() {
                             self.determine_aliasing_condition(target_mem, &access_mem)
                         } else {
                             SymCondition::FALSE
                         };
+
+                        let local_condition = pre.clone().and(aliasing);
+
+                        let condition = self.solver.simplify_condition(match map.remove(&addr) {
+                            Some((previous, _)) => previous.or(local_condition),
+                            None => local_condition,
+                        });
 
                         let symbols = state.symbol_map.iter()
                             .filter(|&(symbol, _)| condition.contains_symbol(*symbol))
@@ -74,8 +85,6 @@ impl<'g> DataflowExplorer<'g> {
                             .collect();
 
                         map.insert(addr, (condition, symbols));
-
-                        // println!("The memory at {:x}: {}", addr, state.memory[0]);
                     }
                 }
 
@@ -88,7 +97,13 @@ impl<'g> DataflowExplorer<'g> {
             // Add all nodes reachable from that one as targets.
             for &id in &self.graph.outgoing[target] {
                 if relevant.contains(&id) {
-                    targets.push((id, state.clone(), target_mem.clone()));
+                    let (condition, value) = self.graph.edges[&(target, id)];
+                    let mut evaluated = state.evaluate(condition);
+                    if !value {
+                        evaluated = evaluated.not();
+                    }
+                    let new_pre = self.solver.simplify_condition(pre.clone().and(evaluated));
+                    targets.push((id, new_pre, state.clone(), target_mem.clone()));
                 }
             }
         }
@@ -104,7 +119,7 @@ impl<'g> DataflowExplorer<'g> {
         fn contains_ptr(area: &TypedMemoryAccess, ptr: &SymExpr) -> SymCondition {
             let area_len = SymExpr::Int(Integer::from_ptr(area.1.bytes() as u64));
             let left = area.0.clone();
-            ptr.clone().sub(left).less(area_len)
+            ptr.clone().sub(left).less_than(area_len, false)
         }
 
         // The data accesses are overlapping if the area of the first one contains
@@ -135,6 +150,7 @@ impl<'g> DataflowExplorer<'g> {
         reachable
     }
 
+    /// Find nodes that are reachable either forwards or backwards.
     fn find_directional_reachable(&self, mut targets: Vec<usize>, forward: bool) -> HashSet<usize> {
         let mut reachable = HashSet::new();
         while let Some(target) = targets.pop() {
@@ -204,37 +220,19 @@ mod tests {
         let program = Program::new("target/bin/bufs-1");
         let graph = FlowGraph::new(&program);
 
+        const SECRET_WRITE_ADDR: u64 = 0x39d;
+
         let mut explorer = DataflowExplorer::new(&graph);
-
-        const SECRET_WRITE_ADDR: u64 = 0x3b8;
         let flow_map = explorer.find_direct_data_flow(SECRET_WRITE_ADDR, |addr, state| {
-            // This function returns the address of the byte access of interest at the given
-            // address if there is one.
-            let inst = program.get_instruction(addr).unwrap();
-
-            if addr == SECRET_WRITE_ADDR {
-                // If this is the criterion secret write, we know which instruction it
-                // is and thus how to find out the address (as it's in rdx).
-                assert_eq!(inst.to_string(), "mov byte ptr [rdx], al");
-
-                let target_addr = state.get_reg(Register::RDX);
-                Some(TypedMemoryAccess(target_addr, N8))
-
-            } else {
-                // We consider any move from somewhere as possibly moving our sensible data.
-                use Mnemoic::*;
-                if [Mov, Movzx, Movsx].contains(&inst.mnemoic) {
-                    let source = inst.operands[1];
-                    state.get_access_for_operand(source)
-                } else {
-                    None
-                }
-            }
+            get_access_addr(addr, state, &program,
+                SECRET_WRITE_ADDR, "mov byte ptr [rdx], al",
+                |state| TypedMemoryAccess(state.get_reg(Register::RDX), N8)
+            )
         });
 
-        println!("Data flow: {}", flow_map);
+        println!("Data flow for bufs-1: {}", flow_map);
 
-        let secret_flow_condition = &flow_map.map[&0x3c5].0;
+        let secret_flow_condition = &flow_map.map[&0x3aa].0;
 
         // Ascii 'z' is 122 and ':' is 58, so the difference is exactly 64.
         // This is the only difference that should satisfy the flow condition.
@@ -256,28 +254,63 @@ mod tests {
         let program = Program::new("target/bin/bufs-2");
         let graph = FlowGraph::new(&program);
 
+        const SECRET_WRITE_ADDR: u64 = 0x399;
+
         let mut explorer = DataflowExplorer::new(&graph);
-
-        const SECRET_WRITE_ADDR: u64 = 0x3b4;
         let flow_map = explorer.find_direct_data_flow(SECRET_WRITE_ADDR, |addr, state| {
-            let inst = program.get_instruction(addr).unwrap();
-
-            if addr == SECRET_WRITE_ADDR {
-                assert_eq!(inst.to_string(), "mov byte ptr [rdx], al");
-                let target_addr = state.get_reg(Register::RDX);
-                Some(TypedMemoryAccess(target_addr, N8))
-
-            } else {
-                use Mnemoic::*;
-                if [Mov, Movzx, Movsx].contains(&inst.mnemoic) {
-                    let source = inst.operands[1];
-                    state.get_access_for_operand(source)
-                } else {
-                    None
-                }
-            }
+            get_access_addr(addr, state, &program,
+                SECRET_WRITE_ADDR, "mov byte ptr [rdx], al",
+                |state| TypedMemoryAccess(state.get_reg(Register::RDX), N8)
+            )
         });
 
-        println!("Data flow: {}", flow_map);
+        println!("Data flow for bufs-2: {}", flow_map);
+    }
+
+    #[test]
+    fn flow_map_bufs_3() {
+        let program = Program::new("target/bin/bufs-3");
+        let graph = FlowGraph::new(&program);
+
+        const SECRET_WRITE_ADDR: u64 = 0x352;
+
+        let mut explorer = DataflowExplorer::new(&graph);
+        let flow_map = explorer.find_direct_data_flow(SECRET_WRITE_ADDR, |addr, state| {
+            get_access_addr(addr, state, &program,
+                SECRET_WRITE_ADDR, "mov byte ptr [rbp+rax*1-0x410], 0x58",
+                |state| TypedMemoryAccess(
+                    state.get_reg(Register::RBP)
+                        .add(state.get_reg(Register::RAX))
+                        .sub(SymExpr::from_ptr(0x410)),
+                    N8
+                )
+            )
+        });
+
+        println!("Data flow for bufs-3: {}", flow_map);
+    }
+
+    /// Generic `get_access_addr` implementation that is customizable for the
+    /// specific example.
+    fn get_access_addr<F>(
+        addr: u64, state: &SymState, program: &Program,
+        secret_write_addr: u64,
+        expected_instruction: &str,
+        target_addr: F
+    ) -> Option<TypedMemoryAccess> where F: Fn(&SymState) -> TypedMemoryAccess {
+        let inst = program.get_instruction(addr).unwrap();
+
+        if addr == secret_write_addr {
+            assert_eq!(inst.to_string(), expected_instruction);
+            Some(target_addr(state))
+        } else {
+            use Mnemoic::*;
+            if [Mov, Movzx, Movsx].contains(&inst.mnemoic) {
+                let source = inst.operands[1];
+                state.get_access_for_operand(source)
+            } else {
+                None
+            }
+        }
     }
 }

@@ -1,8 +1,8 @@
 //! Integers with machine semantics.
 
-use std::cmp::{Ord, PartialOrd, Eq, PartialEq, Ordering};
+use std::cmp::{PartialOrd, Eq, PartialEq};
 use std::fmt::{self, Display, Formatter};
-use std::ops::{Add, Sub, Mul, BitAnd, BitOr, Not};
+use std::ops::{BitAnd, BitOr};
 use byteorder::{ByteOrder, LittleEndian};
 
 use DataType::*;
@@ -68,6 +68,28 @@ macro_rules! flagged {
     };
 }
 
+macro_rules! binop {
+    ($func:ident, $op:tt) => {
+        pub fn $func(self, other: Integer) -> Integer {
+            check_compatible(self.0, other.0, "operation");
+            Integer(self.0, typed!(cast => self.0, false, {
+                (cast(self.1).$op(cast(other.1))) as u64
+            }))
+        }
+    };
+}
+
+macro_rules! cmp_maybe_signed {
+    ($func:ident, $op:tt) => {
+        pub fn $func(self, other: Integer, signed: bool) -> bool {
+            check_compatible(self.0, other.0, "comparison");
+            typed!(cast => self.0, signed, {
+                cast(self.1).$op(&cast(other.1))
+            })
+        }
+    };
+}
+
 impl Integer {
     /// Create a pointer-sized integer.
     pub fn from_ptr(value: u64) -> Integer {
@@ -90,7 +112,7 @@ impl Integer {
     }
 
     /// Convert this integer into bytes.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(self) -> Vec<u8> {
         let mut buf = vec![0; self.0.bytes()];
         match self.0 {
             N8  => buf[0] = self.1 as u8,
@@ -114,6 +136,28 @@ impl Integer {
         }))
     }
 
+    binop!(add, wrapping_add);
+    binop!(sub, wrapping_sub);
+    binop!(mul, wrapping_mul);
+    binop!(bitand, bitand);
+    binop!(bitor, bitor);
+
+    pub fn bitnot(self) -> Integer {
+        Integer(self.0, typed!(cast => self.0, false, { !cast(self.1) as u64 }))
+    }
+
+    pub fn equal(self, other: &Integer) -> bool {
+        check_compatible(self.0, other.0, "comparison");
+        typed!(cast => self.0, false, {
+            cast(self.1) == cast(other.1)
+        })
+    }
+
+    cmp_maybe_signed!(less_than, lt);
+    cmp_maybe_signed!(less_equal, le);
+    cmp_maybe_signed!(greater_than, gt);
+    cmp_maybe_signed!(greater_equal, ge);
+
     // Operations with CPU flags.
     flagged!(flagged_add, sum, a, b => wrapping_add, Flags {
         overflow: a.overflowing_add(b).1, .. flags!(sum)
@@ -134,55 +178,10 @@ impl Display for Integer {
     }
 }
 
-macro_rules! binary_operation {
-    ($trait:ident, $func:ident, $op:tt) => {
-        impl $trait for Integer {
-            type Output = Integer;
-
-            fn $func(self, other: Integer) -> Integer {
-                check_compatible(self.0, other.0, "operation");
-                Integer(self.0, typed!(cast => self.0, false, {
-                    (cast(self.1).$op(cast(other.1))) as u64
-                }))
-            }
-        }
-    };
-}
-
-binary_operation!(Add, add, wrapping_add);
-binary_operation!(Sub, sub, wrapping_sub);
-binary_operation!(Mul, mul, wrapping_mul);
-binary_operation!(BitAnd, bitand, bitand);
-binary_operation!(BitOr, bitor, bitor);
-
-impl Ord for Integer {
-    fn cmp(&self, other: &Integer) -> Ordering {
-        check_compatible(self.0, other.0, "comparison");
-        typed!(cast => self.0, false, {
-            (cast(self.1).cmp(&cast(other.1)))
-        })
-    }
-}
-
-impl PartialOrd for Integer {
-    fn partial_cmp(&self, other: &Integer) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 impl Eq for Integer {}
 impl PartialEq for Integer {
     fn eq(&self, other: &Integer) -> bool {
-        check_compatible(self.0, other.0, "comparison");
-        self.1 == other.1
-    }
-}
-
-impl Not for Integer {
-    type Output = Integer;
-
-    fn not(self) -> Integer {
-        Integer(self.0, typed!(cast => self.0, false, { !cast(self.1) as u64 }))
+        self.equal(other)
     }
 }
 

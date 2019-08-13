@@ -1,6 +1,6 @@
 //! A machine code flow analyzer 🚀 for the `x86_64` architecture based on symbolic execution.
 
-// #![allow(unused)]
+#![allow(unused)]
 
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
@@ -115,6 +115,7 @@ mod tests {
         load_program("func");
         load_program("bufs-1");
         load_program("bufs-2");
+        load_program("bufs-3");
     }
 
     fn load_program(filename: &str) {

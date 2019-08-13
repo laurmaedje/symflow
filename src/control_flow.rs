@@ -540,6 +540,7 @@ mod tests {
         test("func");
         test("bufs-1");
         test("bufs-2");
+        test("bufs-3");
     }
 
     fn test_decycle(left: Vec<&str>, right: Vec<&str>) {

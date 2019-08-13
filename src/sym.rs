@@ -69,9 +69,9 @@ impl SymState {
             Op::Sub { diff, a, b } => self.do_binop(diff, a, b, SymExpr::sub),
             Op::Mul { prod, a, b } => self.do_binop(prod, a, b, SymExpr::mul),
 
-            Op::And { and, a, b } => self.do_binop(and, a, b, SymExpr::bit_and),
-            Op::Or { or, a, b } => self.do_binop(or, a, b, SymExpr::bit_or),
-            Op::Not { not, a } => self.set_temp(not, self.get_temp(a).bit_not()),
+            Op::And { and, a, b } => self.do_binop(and, a, b, SymExpr::bitand),
+            Op::Or { or, a, b } => self.do_binop(or, a, b, SymExpr::bitor),
+            Op::Not { not, a } => self.set_temp(not, self.get_temp(a).bitnot()),
 
             Op::Set { target, condition } => {
                 self.set_temp(target, self.evaluate(condition).as_expr(target.0));
@@ -101,6 +101,55 @@ impl SymState {
     /// Add an address to the path of this state.
     pub fn trace(&mut self, addr: u64) {
         self.path.push(addr);
+    }
+
+    /// Evaluate a jump condition.
+    pub fn evaluate(&self, condition: JumpCondition) -> SymCondition {
+        use JumpCondition::*;
+        use FlaggedOperation as Op;
+
+        match condition {
+            True => SymCondition::TRUE,
+
+            Equal(Op::Sub { a, b }) => self.get_temp(a).equal(self.get_temp(b)),
+
+            Below(Op::Sub { a, b }) => self.get_temp(a).less_than(self.get_temp(b), false),
+            BelowEqual(Op::Sub { a, b }) => self.get_temp(a).less_equal(self.get_temp(b), false),
+            Above(Op::Sub { a, b }) => self.get_temp(a).greater_than(self.get_temp(b), false),
+            AboveEqual(Op::Sub { a, b }) => self.get_temp(a).greater_equal(self.get_temp(b), false),
+
+            Less(Op::Sub { a, b }) => self.get_temp(a).less_than(self.get_temp(b), true),
+            LessEqual(Op::Sub { a, b }) => self.get_temp(a).less_equal(self.get_temp(b), true),
+            Greater(Op::Sub { a, b }) => self.get_temp(a).greater_than(self.get_temp(b), true),
+            GreaterEqual(Op::Sub { a, b }) => self.get_temp(a).greater_equal(self.get_temp(b), true),
+
+            Equal(Op::And { a, b }) => self.get_temp(a).bitand(self.get_temp(b))
+                .equal(SymExpr::int(a.0, 0)),
+
+            _ => panic!("evaluate: unhandled condition/comparison pair"),
+        }
+    }
+
+    /// Return the address expression and data type of the operand if it is a memory access.
+    pub fn get_access_for_operand(&self, operand: Operand) -> Option<TypedMemoryAccess> {
+        match operand {
+            Operand::Indirect { data_type, base, scaled_offset, displacement } => Some({
+                let mut addr = self.get_reg(base);
+
+                if let Some((index, scale)) = scaled_offset {
+                    let scale = SymExpr::from_ptr(scale as u64);
+                    let offset = self.get_reg(index).mul(scale);
+                    addr = addr.add(offset);
+                }
+
+                if let Some(disp) = displacement {
+                    addr = addr.add(SymExpr::from_ptr(disp as u64));
+                }
+
+                TypedMemoryAccess(addr, data_type)
+            }),
+            _ => None,
+        }
     }
 
     /// Retrieve data from a location.
@@ -133,28 +182,6 @@ impl SymState {
                 assert_eq!(addr.data_type(), N64, "write_location: address has to be 64-bit");
                 self.memory[space].write_expr(addr, value);
             }
-        }
-    }
-
-    /// Return the address expression and data type of the operand if it is a memory access.
-    pub fn get_access_for_operand(&self, operand: Operand) -> Option<TypedMemoryAccess> {
-        match operand {
-            Operand::Indirect { data_type, base, scaled_offset, displacement } => Some({
-                let mut addr = self.get_reg(base);
-
-                if let Some((index, scale)) = scaled_offset {
-                    let scale = SymExpr::from_ptr(scale as u64);
-                    let offset = self.get_reg(index).mul(scale);
-                    addr = addr.add(offset);
-                }
-
-                if let Some(disp) = displacement {
-                    addr = addr.add(SymExpr::from_ptr(disp as u64));
-                }
-
-                TypedMemoryAccess(addr, data_type)
-            }),
-            _ => None,
         }
     }
 
@@ -233,27 +260,6 @@ impl SymState {
             s => panic!("do_syscall: unimplemented syscall number {}", s),
         }
         None
-    }
-
-    /// Evaulate a condition.
-    fn evaluate(&self, condition: JumpCondition) -> SymCondition {
-        use JumpCondition::*;
-        use FlaggedOperation as Op;
-
-        match condition {
-            True => SymCondition::TRUE,
-
-            Equal(Op::Sub { a, b }) => self.get_temp(a).equal(self.get_temp(b)),
-            Less(Op::Sub { a, b }) => self.get_temp(a).less(self.get_temp(b)),
-            LessEqual(Op::Sub { a, b }) => self.get_temp(a).less_equal(self.get_temp(b)),
-            Greater(Op::Sub { a, b }) => self.get_temp(a).greater(self.get_temp(b)),
-            GreaterEqual(Op::Sub { a, b }) => self.get_temp(a).greater_equal(self.get_temp(b)),
-
-            Equal(Op::And { a, b }) => self.get_temp(a).bit_and(self.get_temp(b))
-                .equal(SymExpr::int(a.0, 0)),
-
-            _ => panic!("evaluate: unhandled condition/comparison pair"),
-        }
     }
 }
 

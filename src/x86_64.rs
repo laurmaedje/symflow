@@ -20,8 +20,9 @@ pub struct Instruction {
 pub enum Mnemoic {
     Add, Sub, Imul,
     Mov, Movzx, Movsx, Lea,
+    Cwde, Cdqe,
     Push, Pop,
-    Jmp, Je, Jl, Jle, Jg, Jge,
+    Jmp, Je, Jl, Jle, Jg, Jge, Jbe,
     Call, Leave, Ret,
     Cmp, Test,
     Setl,
@@ -183,8 +184,10 @@ impl<'a> Decoder<'a> {
 
         // Handle all the opcodes.
         (opcode, Some(match opcode {
+            &[0x00] => (Mnemoic::Add, RegRm(N8, N8, false)),
             &[0x01] => (Mnemoic::Add, RegRm(scaled, scaled, false)),
             &[0x03] => (Mnemoic::Add, RegRm(scaled, scaled, true)),
+            &[0x05] => (Mnemoic::Add, FixIm(Operand::Direct(Register::EAX), N32)),
             &[0x81] if ext == Some(0) => (Mnemoic::Add, RmIm(scaled, N32)),
             &[0x83] if ext == Some(0) => (Mnemoic::Add, RmIm(scaled, N8)),
             &[0x81] if ext == Some(5) => (Mnemoic::Sub, RmIm(scaled, N32)),
@@ -216,6 +219,7 @@ impl<'a> Decoder<'a> {
             &[0x74] =>(Mnemoic::Je, Rel(N8)),
             &[0x7c] =>(Mnemoic::Jl, Rel(N8)),
             &[0x7e] =>(Mnemoic::Jle, Rel(N8)),
+            &[0x76] =>(Mnemoic::Jbe, Rel(N8)),
             &[0x7f] =>(Mnemoic::Jg, Rel(N8)),
             &[0x7d] =>(Mnemoic::Jge, Rel(N8)),
             &[0xeb] =>(Mnemoic::Jmp, Rel(N8)),
@@ -223,6 +227,7 @@ impl<'a> Decoder<'a> {
             &[0xff] if ext == Some(2) =>(Mnemoic::Call, Rm(N64)),
 
             &[0x90] => (Mnemoic::Nop, Free),
+            &[0x98] => (if rex.w { Mnemoic::Cdqe } else { Mnemoic::Cwde }, Free),
             &[0xc9] => (Mnemoic::Leave, Free),
             &[0xc3] => (Mnemoic::Ret, Free),
             &[0x0f, 0x05] => (Mnemoic::Syscall, Free),
@@ -528,6 +533,7 @@ mod tests {
         test(&[0x01, 0xd0], "add eax, edx");
         test(&[0x4c, 0x03, 0x47, 0x0a], "add r8, qword ptr [rdi+0xa]");
         test(&[0x83, 0xc0, 0x01], "add eax, 0x1");
+        test(&[0x00, 0x45, 0xff], "add byte ptr [rbp-0x1], al");
         test(&[0x48, 0x81, 0xc4, 0x20, 0x04, 0x00, 0x00], "add rsp, 0x420");
         test(&[0x48, 0x81, 0xec, 0x20, 0x04, 0x00, 0x00], "sub rsp, 0x420");
         test(&[0x0f, 0xaf, 0x45, 0xfc], "imul eax, dword ptr [rbp-0x4]");
