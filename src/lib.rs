@@ -1,6 +1,6 @@
 //! A machine code flow analyzer 🚀 for the `x86_64` architecture based on symbolic execution.
 
-// #![allow(unused)]
+#![allow(unused)]
 
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
@@ -17,10 +17,12 @@ mod helper {
     use crate::math::DataType;
 
     pub fn write_signed_hex(f: &mut Formatter, value: i64) -> fmt::Result {
-        if value >= 0 {
+        if value > 0 {
             write!(f, "+{:#x}", value)
-        } else {
+        } else if value < 0 {
             write!(f, "-{:#x}", -value)
+        } else {
+            Ok(())
         }
     }
 
@@ -137,23 +139,23 @@ impl Display for Program {
 mod tests {
     use super::*;
 
-    #[test]
-    fn program() {
-        load_program("block-1");
-        load_program("block-2");
-        load_program("case");
-        load_program("twice");
-        load_program("loop");
-        load_program("recursive-1");
-        load_program("recursive-2");
-        load_program("func");
-        load_program("bufs-1");
-        load_program("bufs-2");
-        load_program("bufs-3");
-    }
-
-    fn load_program(filename: &str) {
+    fn test(filename: &str) {
         let path = format!("target/bin/{}", filename);
         println!("{}: {}\n", filename, Program::new(path));
+    }
+
+    #[test]
+    fn program() {
+        test("block-1");
+        test("block-2");
+        test("case");
+        test("twice");
+        test("loop");
+        test("recursive-1");
+        test("recursive-2");
+        test("func");
+        test("bufs");
+        test("paths");
+        test("deep");
     }
 }

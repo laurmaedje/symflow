@@ -511,7 +511,7 @@ mod tests {
         let graph = FlowGraph::new(&program);
 
         // Visualize the graph into a PDF file.
-        fs::create_dir("target/graphs").ok();
+        fs::create_dir("target/control-flow").ok();
         let flow_temp = "target/temp-flow.gv";
         let flow_file = File::create(flow_temp).unwrap();
         graph.visualize(flow_file, &program, filename, VisualizationStyle::Instructions).unwrap();
@@ -519,7 +519,7 @@ mod tests {
             .arg("-Tpdf")
             .arg(flow_temp)
             .arg("-o")
-            .arg(format!("target/graphs/{}.pdf", filename))
+            .arg(format!("target/control-flow/{}.pdf", filename))
             .output()
             .expect("failed to run graphviz");
         io::stdout().write_all(&output.stdout).unwrap();
@@ -530,15 +530,16 @@ mod tests {
     #[test]
     fn flow_graph() {
         test("block-1");
+        test("block-2");
         test("case");
         test("twice");
         test("loop");
         test("recursive-1");
         test("recursive-2");
         test("func");
-        test("bufs-1");
-        test("bufs-2");
-        test("bufs-3");
+        test("bufs");
+        test("paths");
+        test("deep");
     }
 
     fn test_decycle(left: Vec<&str>, right: Vec<&str>) {

@@ -4,37 +4,51 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::rc::Rc;
 
+use crate::x86_64::Mnemoic;
 use crate::math::{Integer, DataType, SymExpr, SymCondition, SharedSolver, Solver, Traversed};
 use crate::sym::{SymState, MemoryStrategy, SymbolMap, TypedMemoryAccess};
-use super::FlowGraph;
+use super::{FlowGraph, AbstractLocation, StorageLocation};
 use DataType::*;
 
 
+
+/// Maps all abstract locations to the conditions under which there is a
+/// memory access happening at them aliasing with the main access.
+#[derive(Debug, Clone)]
+pub struct AliasMap {
+    pub map: HashMap<AbstractLocation, (SymCondition, SymbolMap)>,
+}
+
+impl AliasMap {
+    pub fn new(graph: &FlowGraph, target: &AbstractLocation) -> AliasMap {
+        AliasExplorer::new(graph, target).run()
+    }
+}
+
 /// Analyzes the data flow between targets and builds a map of conditions.
-pub struct DataflowExplorer<'g> {
+struct AliasExplorer<'g> {
     graph: &'g FlowGraph,
+    target: &'g AbstractLocation,
+    map: HashMap<AbstractLocation, (SymCondition, SymbolMap)>,
     solver: SharedSolver,
 }
 
-impl<'g> DataflowExplorer<'g> {
-    /// Create a new data flow explorer.
-    pub fn new(graph: &'g FlowGraph) -> DataflowExplorer<'g> {
-        DataflowExplorer {
+impl<'g> AliasExplorer<'g> {
+    /// Create a new alias explorer.
+    fn new(graph: &'g FlowGraph, target: &'g AbstractLocation) -> AliasExplorer<'g> {
+        AliasExplorer {
             graph,
+            target,
+            map: HashMap::new(),
             solver: Rc::new(Solver::new()),
         }
     }
 
-    /// Build a data flow map for the `target`. The function `get_access_addr`
-    /// takes an address and a symbolic state and returns the address of a memory
-    /// access of interest happening there if there is any.
-    pub fn find_direct_data_flow<F>(&mut self, target_addr: u64, get_access_addr: F) -> DataFlowMap
-    where F: Fn(u64, &SymState) -> Option<TypedMemoryAccess> {
-
+    /// Build an alias flow map for the target.
+    pub fn run(mut self) -> AliasMap {
         // Find all nodes that can be backwards reached from first or second to
         // narrow down the search.
-        let relevant = self.find_reachable_nodes(target_addr);
-        let mut map = HashMap::<u64, (SymCondition, SymbolMap)>::new();
+        let relevant = self.find_reachable_nodes();
 
         // Start the simulation
         // - at the entry node (index 0)
@@ -49,44 +63,49 @@ impl<'g> DataflowExplorer<'g> {
             let node = &self.graph.nodes[target];
             let block = &self.graph.blocks[&node.addr];
 
-            state.trace(node.addr);
-
             // Simulate a basic block.
-            for (addr, len, _instruction, microcode) in &block.code {
+            for (addr, len, instruction, microcode) in &block.code {
                 let addr = *addr;
                 let next_addr = addr + len;
 
-                let access = get_access_addr(addr, &state);
+                // Adjust the trace.
+                match instruction.mnemoic {
+                    Mnemoic::Call => state.trace.push(addr),
+                    Mnemoic::Ret => { state.trace.pop(); },
+                    _ => {},
+                };
 
-                if addr == target_addr {
-                    let err = "find_direct_data_flow: expected access at target address";
-                    let access_mem = access.expect(err);
-                    target_mem = Some(access_mem);
+                // Check for the target access.
+                if addr == self.target.addr && state.trace == self.target.trace {
+                    let access = state.get_access_for_location(self.target.location)
+                        .expect("expected memory access at target");
+                    target_mem = Some(access);
 
-                } else if let Some(access_mem) = access {
-                    let aliasing = if let Some(target_mem) = target_mem.as_ref() {
-                        self.determine_aliasing_condition(target_mem, &access_mem)
-                    } else {
-                        SymCondition::FALSE
-                    };
+                // Check for another access.
+                } else {
+                    use Mnemoic::*;
+                    if [Mov, Movzx, Movsx].contains(&instruction.mnemoic) {
+                        let source = instruction.operands[1];
 
-                    let local_condition = pre.clone().and(aliasing);
+                        if let Some(storage) = StorageLocation::from_operand(source) {
+                            if let Some(access) = state.get_access_for_location(storage) {
+                                // There is a memory access.
+                                let location = AbstractLocation {
+                                    addr,
+                                    trace: state.trace.clone(),
+                                    location: storage,
+                                };
 
-                    let condition = self.solver.simplify_condition(&match map.remove(&addr) {
-                        Some((previous, _)) => previous.or(local_condition),
-                        None => local_condition,
-                    });
-
-                    let mut symbols = HashMap::new();
-                    condition.traverse(&mut |node| {
-                        if let Traversed::Expr(&SymExpr::Sym(symbol)) = node {
-                            if let Some(loc) = state.symbol_map.get(&symbol) {
-                                symbols.insert(symbol, loc.clone());
+                                self.handle_access(
+                                    target_mem.as_ref(),
+                                    access,
+                                    location,
+                                    &pre,
+                                    &state
+                                );
                             }
                         }
-                    });
-
-                    map.insert(addr, (condition, symbols));
+                    }
                 }
 
                 // Execute the microcode for the instruction.
@@ -106,7 +125,41 @@ impl<'g> DataflowExplorer<'g> {
             }
         }
 
-        DataFlowMap { map }
+        AliasMap { map: self.map }
+    }
+
+    /// Compute the condition for a memory access and add it to the map.
+    fn handle_access(
+        &mut self,
+        target: Option<&TypedMemoryAccess>,
+        access: TypedMemoryAccess,
+        location: AbstractLocation,
+        pre: &SymCondition,
+        state: &SymState,
+    ) {
+        let aliasing = if let Some(target_access) = target {
+            self.determine_aliasing_condition(target_access, &access)
+        } else {
+            SymCondition::FALSE
+        };
+
+        let local_condition = pre.clone().and(aliasing);
+
+        let condition = self.solver.simplify_condition(&match self.map.remove(&location) {
+            Some((previous, _)) => previous.or(local_condition),
+            None => local_condition,
+        });
+
+        let mut symbols = HashMap::new();
+        condition.traverse(&mut |node| {
+            if let Traversed::Expr(&SymExpr::Sym(symbol)) = node {
+                if let Some(loc) = state.symbol_map.get(&symbol) {
+                    symbols.insert(symbol, loc.clone());
+                }
+            }
+        });
+
+        self.map.insert(location, (condition, symbols));
     }
 
     /// Returns the condition under which `a` and `b` point to overlapping memory.
@@ -135,8 +188,8 @@ impl<'g> DataflowExplorer<'g> {
 
     /// Find all reachable nodes for this flow analysis by walking through the
     /// flow graph both forwards and backwards from the target node.
-    fn find_reachable_nodes(&self, target_addr: u64) -> HashSet<usize> {
-        let targets = self.get_containing_nodes(target_addr);
+    fn find_reachable_nodes(&self) -> HashSet<usize> {
+        let targets = self.get_containing_nodes(self.target);
 
         // Explore all blocks reaschable from here and then all blocks going here.
         let forwards_reachable = self.find_directional_reachable(targets.clone(), true);
@@ -165,11 +218,12 @@ impl<'g> DataflowExplorer<'g> {
     }
 
     /// Get all nodes whose blocks contain the given address.
-    fn get_containing_nodes(&self, addr: u64) -> Vec<usize> {
+    fn get_containing_nodes(&self, location: &AbstractLocation) -> Vec<usize> {
         let mut nodes = Vec::new();
         for (index, node) in self.graph.nodes.iter().enumerate() {
             let block = &self.graph.blocks[&node.addr];
-            if addr >= block.addr && addr <= block.addr + block.len {
+            if location.addr >= block.addr && location.addr <= block.addr + block.len
+               && location.trace.iter().eq(node.trace.iter().map(|(callsite, _)| callsite)) {
                 nodes.push(index);
             }
         }
@@ -177,27 +231,20 @@ impl<'g> DataflowExplorer<'g> {
     }
 }
 
-/// Maps all data flow targets to the conditions under which data flows from the main
-/// target into them.
-#[derive(Debug, Clone)]
-pub struct DataFlowMap {
-    pub map: HashMap<u64, (SymCondition, SymbolMap)>,
-}
-
-impl Display for DataFlowMap {
+impl Display for AliasMap {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "DataFlowMap [")?;
+        write!(f, "AliasMap [")?;
         if !self.map.is_empty() { writeln!(f)?; }
         let mut map: Vec<_> = self.map.iter().collect();
         map.sort_by_key(|pair| pair.0);
-        for (addr, (condition, symbols)) in map {
-            writeln!(f, "    {:x}: {}", addr, condition)?;
+        for (location, (condition, symbols)) in map {
+            writeln!(f, "    {}: {}", location, condition)?;
             if !symbols.is_empty() {
                 let mut symbols: Vec<_> = symbols.iter().collect();
                 symbols.sort_by_key(|pair| pair.0);
-                writeln!(f, "         where ")?;
+                writeln!(f, "    where ")?;
                 for (symbol, location) in symbols {
-                    writeln!(f, "             {} is {}", symbol, location)?;
+                    writeln!(f, "        {} is {}", symbol, location)?;
                 }
             }
         }
@@ -208,29 +255,42 @@ impl Display for DataFlowMap {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{self, File};
+    use std::io::Write;
     use crate::Program;
-    use crate::x86_64::{Mnemoic, Register};
+    use crate::x86_64::Register;
     use crate::math::Symbol;
+    use crate::flow::StorageLocation;
     use super::*;
 
-    #[test]
-    fn flow_map_1() {
-        let program = Program::new("target/bin/bufs-1");
+    fn test(filename: &str, location: AbstractLocation) -> AliasMap {
+        let path = format!("target/bin/{}", filename);
+
+        let program = Program::new(path);
         let graph = FlowGraph::new(&program);
+        let map = AliasMap::new(&graph, &location);
 
-        const SECRET_WRITE_ADDR: u64 = 0x39d;
+        fs::create_dir("target/value-flow").ok();
+        let alias_path = format!("target/value-flow/alias-{}.txt", filename);
+        let mut alias_file = File::create(alias_path).unwrap();
+        write!(alias_file, "{}", map).unwrap();
 
-        let mut explorer = DataflowExplorer::new(&graph);
-        let flow_map = explorer.find_direct_data_flow(SECRET_WRITE_ADDR, |addr, state| {
-            get_access_addr(addr, state, &program,
-                SECRET_WRITE_ADDR, "mov byte ptr [rdx], al",
-                |state| TypedMemoryAccess(state.get_reg(Register::RDX), N8)
-            )
+        map
+    }
+
+    #[test]
+    fn bufs() {
+        let alias_map = test("bufs", AbstractLocation {
+            addr: 0x39d,
+            trace: vec![0x2ba],
+            location: StorageLocation::indirect_reg(N8, Register::RDX),
         });
 
-        println!("Data flow for bufs-1: {}", flow_map);
-
-        let secret_flow_condition = &flow_map.map[&0x3aa].0;
+        let secret_flow_condition = &alias_map.map[&AbstractLocation {
+            addr: 0x3aa,
+            trace: vec![0x2ba],
+            location: StorageLocation::indirect_reg(N8, Register::RAX),
+        }].0;
 
         // Ascii 'z' is 122 and ':' is 58, so the difference is exactly 64.
         // This is the only difference that should satisfy the flow condition.
@@ -248,67 +308,25 @@ mod tests {
     }
 
     #[test]
-    fn flow_map_2() {
-        let program = Program::new("target/bin/bufs-2");
-        let graph = FlowGraph::new(&program);
-
-        const SECRET_WRITE_ADDR: u64 = 0x399;
-
-        let mut explorer = DataflowExplorer::new(&graph);
-        let flow_map = explorer.find_direct_data_flow(SECRET_WRITE_ADDR, |addr, state| {
-            get_access_addr(addr, state, &program,
-                SECRET_WRITE_ADDR, "mov byte ptr [rdx], al",
-                |state| TypedMemoryAccess(state.get_reg(Register::RDX), N8)
-            )
+    fn paths() {
+        test("paths", AbstractLocation {
+            addr: 0x352,
+            trace: vec![0x2ba],
+            location: StorageLocation::Indirect {
+                data_type: N8,
+                base: Register::RBP,
+                scaled_offset: Some((Register::RAX, 1)),
+                displacement: Some(-0x410),
+            },
         });
-
-        println!("Data flow for bufs-2: {}", flow_map);
     }
 
     #[test]
-    fn flow_map_3() {
-        let program = Program::new("target/bin/bufs-3");
-        let graph = FlowGraph::new(&program);
-
-        const SECRET_WRITE_ADDR: u64 = 0x352;
-
-        let mut explorer = DataflowExplorer::new(&graph);
-        let flow_map = explorer.find_direct_data_flow(SECRET_WRITE_ADDR, |addr, state| {
-            get_access_addr(addr, state, &program,
-                SECRET_WRITE_ADDR, "mov byte ptr [rbp+rax*1-0x410], 0x58",
-                |state| TypedMemoryAccess(
-                    state.get_reg(Register::RBP)
-                        .add(state.get_reg(Register::RAX))
-                        .sub(SymExpr::from_ptr(0x410)),
-                    N8
-                )
-            )
+    fn deep() {
+        test("deep", AbstractLocation {
+            addr: 0x399,
+            trace: vec![0x2ba],
+            location: StorageLocation::indirect_reg(N8, Register::RDX),
         });
-
-        println!("Data flow for bufs-3: {}", flow_map);
-    }
-
-    /// Generic `get_access_addr` implementation that is customizable for the
-    /// specific example.
-    fn get_access_addr<F>(
-        addr: u64, state: &SymState, program: &Program,
-        secret_write_addr: u64,
-        expected_instruction: &str,
-        target_addr: F
-    ) -> Option<TypedMemoryAccess> where F: Fn(&SymState) -> TypedMemoryAccess {
-        let inst = program.get_instruction(addr).unwrap();
-
-        if addr == secret_write_addr {
-            assert_eq!(inst.to_string(), expected_instruction);
-            Some(target_addr(state))
-        } else {
-            use Mnemoic::*;
-            if [Mov, Movzx, Movsx].contains(&inst.mnemoic) {
-                let source = inst.operands[1];
-                state.get_access_for_operand(source)
-            } else {
-                None
-            }
-        }
     }
 }

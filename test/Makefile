@@ -1,7 +1,7 @@
 names := \
 	block-1 block-2 case twice loop func \
 	recursive-1 recursive-2 \
-	bufs-1 bufs-2 bufs-3
+	bufs paths deep
 
 target := ../target
 bins := $(addprefix $(target)/bin/, $(names))

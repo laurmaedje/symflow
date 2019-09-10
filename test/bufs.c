@@ -16,6 +16,3 @@ void main() {
 
     write_one_byte(s);
 }
-
-// Data dependency solution:
-// write(a, x) -> read(b, y) <=> x = y + 64

@@ -16,7 +16,3 @@ void main() {
 
     write_one_byte(s);
 }
-
-// Data dependency solution:
-// write(b, x) -> read(a, x) <=> x = y
-// write(b, x) -> read(b, a[x]) <=> x == if (x == y) then secret else mem
