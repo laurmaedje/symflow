@@ -85,6 +85,18 @@ impl Instruction {
             },
 
             Mov | Movzx | Movsx => both(loc(self.operands[1]), loc(self.operands[0])),
+            Lea => {
+                let target = get!(self.operands[0]);
+                let source = get!(self.operands[1]);
+                let mut pairs = vec![];
+                if let StorageLocation::Indirect { base, scaled_offset, .. } = source {
+                    pairs.push((reg(base), target));
+                    if let Some((offset, _)) = scaled_offset {
+                        pairs.push((reg(offset), target));
+                    }
+                }
+                pairs
+            },
 
             Cwde => vec![(reg(AX), reg(EAX))],
             Cdqe => vec![(reg(EAX), reg(RAX))],
@@ -95,7 +107,7 @@ impl Instruction {
                     data_type: target.data_type(),
                     base: RSP,
                     scaled_offset: None,
-                    displacement: Some(target.data_type().bytes() as i64),
+                    displacement: Some(-(target.data_type().bytes() as i64)),
                 })]
             },
             Pop => {

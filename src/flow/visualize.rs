@@ -64,6 +64,6 @@ pub mod test {
             .expect("failed to run graphviz");
         std::io::stdout().write_all(&output.stdout).unwrap();
         std::io::stderr().write_all(&output.stderr).unwrap();
-        fs::remove_file(flow_temp).unwrap();
+        // fs::remove_file(flow_temp).unwrap();
     }
 }

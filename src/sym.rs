@@ -29,7 +29,8 @@ pub struct SymState {
     /// The shared SMT solver.
     pub solver: SharedSolver,
     /// The number of used symbols.
-    symbols: usize,
+    stdin_symbols: usize,
+    stdout_symbols: usize,
 }
 
 impl SymState {
@@ -45,7 +46,8 @@ impl SymState {
             symbol_map: SymbolMap::new(),
             trace: Vec::new(),
             ip: 0,
-            symbols: 0,
+            stdin_symbols: 0,
+            stdout_symbols: 0,
             solver
         }
     }
@@ -215,9 +217,11 @@ impl SymState {
     /// Emulate a Linux syscall.
     fn do_syscall(&mut self, num: u64) -> Option<Event> {
         match num {
-            // Read from a file descriptor.
-            // We generate one symbol per byte read.
-            0 => {
+            // Read from or write to a file descriptor.
+            // We generate one symbol per byte read / written.
+            0 | 1 => {
+                let read = num == 0;
+
                 let buf = self.get_reg(Register::RSI);
                 let count = self.get_reg(Register::RDX);
                 let byte_count = match count {
@@ -225,32 +229,42 @@ impl SymState {
                     _ => panic!("do_syscall: read: unknown byte count"),
                 };
 
+                let mut locs = vec![];
+
                 for i in 0 .. byte_count {
-                    let target = buf.clone().add(SymExpr::from_ptr(i));
-
-                    let symbol = Symbol(N8, "stdin", self.symbols);
-                    let value = SymExpr::Sym(symbol);
-                    self.symbols += 1;
-
-                    self.memory[0].write_expr(target, value);
-
-                    let location = StorageLocation::Indirect {
-                        data_type: N8,
-                        base: Register::RSI,
-                        scaled_offset: None,
-                        displacement: if i > 0 { Some(i as i64) } else { None },
+                    let symbol_ptr = if read {
+                        &mut self.stdin_symbols
+                    } else {
+                        &mut self.stdout_symbols
                     };
 
-                    self.symbol_map.insert(symbol, AbstractLocation {
+                    let symbol = Symbol(N8, if read { "stdin" } else { "stdout" }, *symbol_ptr);
+                    let value = SymExpr::Sym(symbol);
+                    *symbol_ptr += 1;
+
+                    let target = buf.clone().add(SymExpr::from_ptr(i));
+                    if read {
+                        self.memory[0].write_expr(target.clone(), value);
+                    }
+
+                    let location = AbstractLocation {
                         addr: self.ip,
                         trace: self.trace.clone(),
-                        location,
-                    });
-                }
-            },
+                        storage: StorageLocation::Indirect {
+                            data_type: N8,
+                            base: Register::RSI,
+                            scaled_offset: None,
+                            displacement: if i > 0 { Some(i as i64) } else { None },
+                        },
+                    };
 
-            // Write to a file descriptor (has no effect, so we do nothing).
-            1 => {},
+                    self.symbol_map.insert(symbol, location);
+                    locs.push((symbol, TypedMemoryAccess(target, N8)));
+                }
+
+                let kind = if read { StdioKind::Stdin } else { StdioKind::Stdout };
+                return Some(Event::Stdio(kind, locs));
+            },
 
             // System exit
             60 => return Some(Event::Exit),
@@ -264,6 +278,7 @@ impl SymState {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Event {
     Jump { target: SymExpr, condition: SymCondition, relative: bool },
+    Stdio(StdioKind, Vec<(Symbol, TypedMemoryAccess)>),
     Exit,
 }
 
@@ -478,4 +493,11 @@ impl Display for TypedMemoryAccess {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "[{}]:{}", self.0, self.1)
     }
+}
+
+/// Kinds of standard interfaces (stdin or stdout).
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub enum StdioKind {
+    Stdin,
+    Stdout,
 }

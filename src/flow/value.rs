@@ -5,9 +5,10 @@ use std::io::{self, Write};
 use std::rc::Rc;
 
 use crate::x86_64::Register;
-use crate::math::{SymCondition, SharedSolver, Solver};
-use crate::sym::{SymState, MemoryStrategy};
+use crate::math::{SymCondition, Symbol, SharedSolver, Solver};
+use crate::sym::{SymState, Event, MemoryStrategy, TypedMemoryAccess, StdioKind};
 use super::{ControlFlowGraph, AbstractLocation, StorageLocation};
+use super::alias::determine_aliasing_condition;
 
 
 /// Contains the conditions under which values flow between abstract locations.
@@ -18,6 +19,9 @@ pub struct ValueFlowGraph {
     /// The conditions for value flow between the abstract locations.
     /// The key pairs are indices into the `nodes` vector.
     pub edges: HashMap<(usize, usize), SymCondition>,
+    /// For reads or writes through standard interfaces we keep the node they go to,
+    /// the kind of I/O and the name of the symbol we read from or wrote to.
+    pub io: Vec<(usize, StdioKind, Symbol)>,
 }
 
 impl ValueFlowGraph {
@@ -37,8 +41,22 @@ impl ValueFlowGraph {
 
         write_header(&mut f, &format!("Value flow graph for {}", title))?;
 
+        for (index, (loc, kind, symbol)) in self.io.iter().enumerate() {
+            let color = match kind {
+                StdioKind::Stdin => "#4caf50",
+                StdioKind::Stdout => "#03a9f4",
+            };
+            writeln!(f, "k{} [label=<<b>{}</b>>, shape=box, style=filled, fillcolor=\"{}\"]",
+                index, symbol, color)?;
+
+            match kind {
+                StdioKind::Stdin => writeln!(f, "k{} -> b{}", index, loc)?,
+                StdioKind::Stdout => writeln!(f, "b{} -> k{}", loc, index)?,
+            }
+        }
+
         for (index, node) in self.nodes.iter().enumerate() {
-            let fmt = node.to_string().replace(">", "&lt;");
+            let fmt = node.to_string().replace(">", "&gt;");
             let mut splitter = fmt.splitn(2, ' ');
             writeln!(f, "b{} [label=<<b>{}</b> {}>, shape=box]", index,
                     splitter.next().unwrap(), splitter.next().unwrap())?;
@@ -48,7 +66,7 @@ impl ValueFlowGraph {
             if condition != &SymCondition::TRUE {
                 write!(f, "label=\"{}\", ", condition)?;
             }
-            if self.nodes[start].location.normalized() == self.nodes[end].location.normalized() {
+            if self.nodes[start].storage.normalized() == self.nodes[end].storage.normalized() {
                 write!(f, "style=dashed, ")?;
             }
             write!(f, "color=grey")
@@ -64,6 +82,18 @@ struct ValueFlowExplorer<'g> {
     solver: SharedSolver,
     nodes: HashMap<AbstractLocation, usize>,
     edges: HashMap<(usize, usize), SymCondition>,
+    io: HashMap<AbstractLocation, (StdioKind, Symbol)>,
+}
+
+#[derive(Clone)]
+struct ExplorationTarget {
+    target: usize,
+    state: SymState,
+    location_links: HashMap<StorageLocation, usize>,
+
+    /// All past writing memory accesses with their abstract location index (node id).
+    /// Whenever a reading memory access happens we can compare it with all these.
+    write_accesses: Vec<(usize, TypedMemoryAccess)>
 }
 
 impl<'g> ValueFlowExplorer<'g> {
@@ -73,6 +103,7 @@ impl<'g> ValueFlowExplorer<'g> {
             solver: Rc::new(Solver::new()),
             nodes: HashMap::new(),
             edges: HashMap::new(),
+            io: HashMap::new(),
         }
     }
 
@@ -86,10 +117,16 @@ impl<'g> ValueFlowExplorer<'g> {
     /// associated with them.
     pub fn run(mut self) -> ValueFlowGraph {
         let base_state = SymState::new(MemoryStrategy::ConditionalTrees, self.solver.clone());
-        let mut targets = vec![(0, base_state, HashMap::new())];
 
-        while let Some((target, mut state, mut location_links)) = targets.pop() {
-            let node = &self.graph.nodes[target];
+        let mut targets = vec![ExplorationTarget {
+            target: 0,
+            state: base_state,
+            location_links: HashMap::new(),
+            write_accesses: Vec::new(),
+        }];
+
+        while let Some(mut exp) = targets.pop() {
+            let node = &self.graph.nodes[exp.target];
             let block = &self.graph.blocks[&node.addr];
 
             // Simulate a basic block.
@@ -97,41 +134,82 @@ impl<'g> ValueFlowExplorer<'g> {
                 let addr = *addr;
                 let next_addr = addr + len;
 
-                state.track(&instruction, addr);
+                exp.state.track(&instruction, addr);
 
                 for (source, sink) in instruction.flows() {
-                    let source_index = self.insert_node(add_context(source, addr, &state.trace));
-                    let sink_index = self.insert_node(add_context(sink, addr, &state.trace));
+                    let source_index = self.insert_node(add_context(source, addr, &exp.state.trace));
+                    let sink_index = self.insert_node(add_context(sink, addr, &exp.state.trace));
 
                     // Connect the abstract locations to their predecessors.
-                    self.connect_previous(&mut location_links, source, source_index);
-                    self.connect_previous(&mut location_links, sink, sink_index);
+                    self.connect_previous(&mut exp.location_links, source, source_index, false);
+                    self.connect_previous(&mut exp.location_links, sink, sink_index, true);
 
                     // For flows inherent to an instruction the condition is
                     // obviously always true.
                     self.edges.insert((source_index, sink_index), SymCondition::TRUE);
+
+                    // For writing memory accesses we need to store them so we
+                    // can check reading accesses later on for aliasing.
+                    if let Some(access) = exp.state.get_access_for_location(sink) {
+                        exp.write_accesses.push((sink_index, access));
+                    }
+
+                    // For reading memory accesses we need to check if the alias
+                    // with any of the previous writing ones.
+                    if let Some(access) = exp.state.get_access_for_location(source) {
+                        self.handle_access(source_index, access, &exp);
+                    }
                 }
 
                 // Execute the microcode for the instruction.
                 for op in &microcode.ops {
-                    state.step(next_addr, op);
+                    if let Some(event) = exp.state.step(next_addr, op) {
+                        match event {
+                            // Generate I/O nodes.
+                            Event::Stdio(kind, symbols) => {
+                                for (symbol, access) in symbols {
+                                    // Add to the previous links list.
+                                    let location = exp.state.symbol_map[&symbol].clone();
+                                    let index = self.insert_node(location.clone());
+                                    exp.location_links.insert(location.storage.normalized(), index);
+
+                                    // If it is a stdin read, that is, a memory write, add it
+                                    // to the write access list.
+                                    match kind {
+                                        StdioKind::Stdin => exp.write_accesses.push((index, access)),
+                                        StdioKind::Stdout => self.handle_access(index, access, &exp),
+                                    }
+
+                                    self.io.insert(location, (kind, symbol));
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
                 }
             }
 
             // Add all nodes reachable from that one as targets.
-            for &id in &self.graph.outgoing[target] {
-                targets.push((id, state.clone(), location_links.clone()));
+            for &id in &self.graph.outgoing[exp.target] {
+                targets.push(ExplorationTarget {
+                    target: id,
+                    .. exp.clone()
+                });
             }
         }
 
-        // Arrange the nodes into a vector.
+        // Arrange the I/O into a vector.
+        let io = self.io.iter()
+            .map(|(loc, &(kind, symbol))| (self.nodes[loc], kind, symbol)).collect();
+
         let count = self.nodes.len();
         let default = AbstractLocation {
             addr: 0, trace: Vec::new(),
-            location: StorageLocation::Direct(Register::RAX)
+            storage: StorageLocation::Direct(Register::RAX)
         };
-        let mut nodes = vec![default; count];
 
+        // Arrange the nodes into a vector.
+        let mut nodes = vec![default; count];
         for (node, index) in self.nodes.into_iter() {
             nodes[index] = node;
         }
@@ -139,6 +217,7 @@ impl<'g> ValueFlowExplorer<'g> {
         ValueFlowGraph {
             nodes,
             edges: self.edges,
+            io,
         }
     }
 
@@ -157,12 +236,13 @@ impl<'g> ValueFlowExplorer<'g> {
         links: &mut HashMap<StorageLocation, usize>,
         location: StorageLocation,
         index: usize,
+        overwritten: bool
     ) {
         // We only consider direct registers here and not memory storage slots
         // because eventhough they may have the same "location", i.e. the
         // same address formula based on registers the actual address may
         // differ depending on the register values.
-        if let StorageLocation::Indirect { .. } = location {
+        if location.accesses_memory() {
             return;
         }
 
@@ -172,19 +252,35 @@ impl<'g> ValueFlowExplorer<'g> {
 
         // Add a link to the previous abstract location of the same
         // storage location if it was used before.
-        if let Some(prev) = links.get(&location) {
-            self.edges.insert((*prev, index), SymCondition::TRUE);
+        if !overwritten {
+            if let Some(prev) = links.get(&location) {
+                self.edges.insert((*prev, index), SymCondition::TRUE);
+            }
         }
 
         links.insert(location, index);
     }
+
+    fn handle_access(&mut self, index: usize, access: TypedMemoryAccess, exp: &ExplorationTarget) {
+        for (prev_index, prev) in &exp.write_accesses {
+            let condition = determine_aliasing_condition(
+                &self.solver,
+                prev,
+                &access
+            );
+
+            if condition != SymCondition::FALSE {
+                self.edges.insert((*prev_index, index), condition);
+            }
+        }
+    }
 }
 
-fn add_context(location: StorageLocation, addr: u64, trace: &[u64]) -> AbstractLocation {
+fn add_context(storage: StorageLocation, addr: u64, trace: &[u64]) -> AbstractLocation {
     AbstractLocation {
         addr,
         trace: trace.to_vec(),
-        location
+        storage
     }
 }
 

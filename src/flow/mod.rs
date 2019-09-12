@@ -14,15 +14,15 @@ pub use alias::*;
 pub use value::*;
 
 
-/// A CPU location within the context in which it is valid.
+/// A storage location within the context in which it is valid.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct AbstractLocation {
     /// The address at which the location is valid.
     pub addr: u64,
     /// The call trace in which the location is valid.
     pub trace: Vec<u64>,
-    /// The storage
-    pub location: StorageLocation,
+    /// The storage location.
+    pub storage: StorageLocation,
 }
 
 /// A location in a real execution.
@@ -63,14 +63,6 @@ impl StorageLocation {
         }
     }
 
-    /// The underlying data type of the value at the location.
-    pub fn data_type(&self) -> DataType {
-        match *self {
-            StorageLocation::Direct(reg) => reg.data_type(),
-            StorageLocation::Indirect { data_type, .. } => data_type,
-        }
-    }
-
     /// Change to base 64-bit registers for direct storage.
     ///
     /// This can be useful for comparing storage locations with registers
@@ -81,11 +73,27 @@ impl StorageLocation {
             s => s,
         }
     }
+
+    /// Whether this in an indirect access.
+    pub fn accesses_memory(&self) -> bool {
+        match self {
+            StorageLocation::Direct(_) => false,
+            StorageLocation::Indirect { .. } => true,
+        }
+    }
+
+    /// The underlying data type of the value at the location.
+    pub fn data_type(&self) -> DataType {
+        match *self {
+            StorageLocation::Direct(reg) => reg.data_type(),
+            StorageLocation::Indirect { data_type, .. } => data_type,
+        }
+    }
 }
 
 impl Display for AbstractLocation {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{} at {:x}", self.location, self.addr)?;
+        write!(f, "{} at {:x}", self.storage, self.addr)?;
         if !self.trace.is_empty() {
             write!(f, " by ")?;
         }

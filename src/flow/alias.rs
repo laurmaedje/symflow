@@ -72,7 +72,7 @@ impl<'g> AliasExplorer<'g> {
 
                 // Check for the target access.
                 if addr == self.target.addr && state.trace == self.target.trace {
-                    let access = state.get_access_for_location(self.target.location)
+                    let access = state.get_access_for_location(self.target.storage)
                         .expect("expected memory access at target");
                     target_mem = Some(access);
 
@@ -88,7 +88,7 @@ impl<'g> AliasExplorer<'g> {
                                 let location = AbstractLocation {
                                     addr,
                                     trace: state.trace.clone(),
-                                    location: storage,
+                                    storage,
                                 };
 
                                 self.handle_access(
@@ -133,7 +133,7 @@ impl<'g> AliasExplorer<'g> {
         state: &SymState,
     ) {
         let aliasing = if let Some(target_access) = target {
-            self.determine_aliasing_condition(target_access, &access)
+            determine_aliasing_condition(&self.solver, target_access, &access)
         } else {
             SymCondition::FALSE
         };
@@ -155,30 +155,6 @@ impl<'g> AliasExplorer<'g> {
         });
 
         self.map.insert(location, (condition, symbols));
-    }
-
-    /// Returns the condition under which `a` and `b` point to overlapping memory.
-    fn determine_aliasing_condition(&self, a: &TypedMemoryAccess, b: &TypedMemoryAccess)
-    -> SymCondition {
-        /// Return the condition under which `ptr` is in the area spanned by
-        /// pointer of `area` and the following bytes based on the data type.
-        fn contains_ptr(area: &TypedMemoryAccess, ptr: &SymExpr) -> SymCondition {
-            let area_len = SymExpr::Int(Integer::from_ptr(area.1.bytes() as u64));
-            let left = area.0.clone();
-            ptr.clone().sub(left).less_than(area_len, false)
-        }
-
-        // The data accesses are overlapping if the area of the first one contains
-        // the second one or the other way around, where the area is the memory
-        // from the start of the pointer until the start + the byte width.
-        let condition = match (a.1, b.1) {
-            (N8, N8) => a.0.clone().equal(b.0.clone()),
-            (N8, _) => contains_ptr(b, &a.0),
-            (_, N8) => contains_ptr(a, &b.0),
-            (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
-        };
-
-        self.solver.simplify_condition(&condition)
     }
 
     /// Find all reachable nodes for this flow analysis by walking through the
@@ -224,6 +200,33 @@ impl<'g> AliasExplorer<'g> {
         }
         nodes
     }
+}
+
+/// Returns the condition under which `a` and `b` point to overlapping memory.
+pub fn determine_aliasing_condition(
+    solver: &Solver,
+    a: &TypedMemoryAccess,
+    b: &TypedMemoryAccess
+) -> SymCondition {
+    /// Return the condition under which `ptr` is in the area spanned by
+    /// pointer of `area` and the following bytes based on the data type.
+    fn contains_ptr(area: &TypedMemoryAccess, ptr: &SymExpr) -> SymCondition {
+        let area_len = SymExpr::Int(Integer::from_ptr(area.1.bytes() as u64));
+        let left = area.0.clone();
+        ptr.clone().sub(left).less_than(area_len, false)
+    }
+
+    // The data accesses are overlapping if the area of the first one contains
+    // the second one or the other way around, where the area is the memory
+    // from the start of the pointer until the start + the byte width.
+    let condition = match (a.1, b.1) {
+        (N8, N8) => a.0.clone().equal(b.0.clone()),
+        (N8, _) => contains_ptr(b, &a.0),
+        (_, N8) => contains_ptr(a, &b.0),
+        (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
+    };
+
+    solver.simplify_condition(&condition)
 }
 
 impl Display for AliasMap {
@@ -278,13 +281,13 @@ mod tests {
         let alias_map = test("bufs", AbstractLocation {
             addr: 0x39d,
             trace: vec![0x2ba],
-            location: StorageLocation::indirect_reg(N8, Register::RDX),
+            storage: StorageLocation::indirect_reg(N8, Register::RDX),
         });
 
         let secret_flow_condition = &alias_map.map[&AbstractLocation {
             addr: 0x3aa,
             trace: vec![0x2ba],
-            location: StorageLocation::indirect_reg(N8, Register::RAX),
+            storage: StorageLocation::indirect_reg(N8, Register::RAX),
         }].0;
 
         // Ascii 'z' is 122 and ':' is 58, so the difference is exactly 64.
@@ -305,9 +308,9 @@ mod tests {
     #[test]
     fn paths() {
         test("paths", AbstractLocation {
-            addr: 0x352,
+            addr: 0x363,
             trace: vec![0x2ba],
-            location: StorageLocation::Indirect {
+            storage: StorageLocation::Indirect {
                 data_type: N8,
                 base: Register::RBP,
                 scaled_offset: Some((Register::RAX, 1)),
@@ -321,7 +324,7 @@ mod tests {
         test("deep", AbstractLocation {
             addr: 0x399,
             trace: vec![0x2ba],
-            location: StorageLocation::indirect_reg(N8, Register::RDX),
+            storage: StorageLocation::indirect_reg(N8, Register::RDX),
         });
     }
 }
