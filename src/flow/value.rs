@@ -1,16 +1,13 @@
 //! Value flow analysis.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{self, Write};
-use std::fmt::{self, Display, Formatter};
 use std::rc::Rc;
 
-use crate::Program;
-use crate::x86_64::Mnemoic;
-use crate::math::{Integer, DataType, SymExpr, SymCondition, SharedSolver, Solver, Traversed};
-use crate::sym::{SymState, MemoryStrategy, SymbolMap, TypedMemoryAccess};
+use crate::x86_64::Register;
+use crate::math::{SymCondition, SharedSolver, Solver};
+use crate::sym::{SymState, MemoryStrategy};
 use super::{ControlFlowGraph, AbstractLocation, StorageLocation};
-use DataType::*;
 
 
 /// Contains the conditions under which values flow between abstract locations.
@@ -33,7 +30,6 @@ impl ValueFlowGraph {
     pub fn visualize<W: Write>(
         &self,
         target: W,
-        program: &Program,
         title: &str,
     ) -> io::Result<()> {
         use super::visualize::*;
@@ -41,59 +37,173 @@ impl ValueFlowGraph {
 
         write_header(&mut f, &format!("Value flow graph for {}", title))?;
 
-        // Export the blocks.
         for (index, node) in self.nodes.iter().enumerate() {
-            write!(f, "b{} [label=<{}>]", index, node)?;
+            let fmt = node.to_string().replace(">", "&lt;");
+            let mut splitter = fmt.splitn(2, ' ');
+            writeln!(f, "b{} [label=<<b>{}</b> {}>, shape=box]", index,
+                    splitter.next().unwrap(), splitter.next().unwrap())?;
         }
 
-        write_edges(&mut f, &self.edges)?;
+        write_edges(&mut f, &self.edges, |f, ((start, end), condition)| {
+            if condition != &SymCondition::TRUE {
+                write!(f, "label=\"{}\", ", condition)?;
+            }
+            if self.nodes[start].location.normalized() == self.nodes[end].location.normalized() {
+                write!(f, "style=dashed, ")?;
+            }
+            write!(f, "color=grey")
+        })?;
+
         write_footer(&mut f)
     }
 }
 
-/// Analyzes the value flow in the whole executable, building a value flow graph.
+/// Analyses the value flow in the whole executable, building a value flow graph.
 struct ValueFlowExplorer<'g> {
     graph: &'g ControlFlowGraph,
     solver: SharedSolver,
+    nodes: HashMap<AbstractLocation, usize>,
+    edges: HashMap<(usize, usize), SymCondition>,
 }
 
 impl<'g> ValueFlowExplorer<'g> {
-    /// Create a new value flow explorer.
     fn new(graph: &'g ControlFlowGraph) -> ValueFlowExplorer<'g> {
         ValueFlowExplorer {
             graph,
             solver: Rc::new(Solver::new()),
+            nodes: HashMap::new(),
+            edges: HashMap::new(),
         }
     }
 
     /// Build the value flow graph.
+    /// -----------------------------------------------------------------------
+    /// This function traverses the complete control flow graph,
+    /// symbolically executing each path.
+    ///
+    /// All direct flows are translated into edges with condition _True_ in the
+    /// graph. Indirect flows through memory can have more complex conditions
+    /// associated with them.
     pub fn run(mut self) -> ValueFlowGraph {
-        unimplemented!()
+        let base_state = SymState::new(MemoryStrategy::ConditionalTrees, self.solver.clone());
+        let mut targets = vec![(0, base_state, HashMap::new())];
+
+        while let Some((target, mut state, mut location_links)) = targets.pop() {
+            let node = &self.graph.nodes[target];
+            let block = &self.graph.blocks[&node.addr];
+
+            // Simulate a basic block.
+            for (addr, len, instruction, microcode) in &block.code {
+                let addr = *addr;
+                let next_addr = addr + len;
+
+                state.track(&instruction, addr);
+
+                for (source, sink) in instruction.flows() {
+                    let source_index = self.insert_node(add_context(source, addr, &state.trace));
+                    let sink_index = self.insert_node(add_context(sink, addr, &state.trace));
+
+                    // Connect the abstract locations to their predecessors.
+                    self.connect_previous(&mut location_links, source, source_index);
+                    self.connect_previous(&mut location_links, sink, sink_index);
+
+                    // For flows inherent to an instruction the condition is
+                    // obviously always true.
+                    self.edges.insert((source_index, sink_index), SymCondition::TRUE);
+                }
+
+                // Execute the microcode for the instruction.
+                for op in &microcode.ops {
+                    state.step(next_addr, op);
+                }
+            }
+
+            // Add all nodes reachable from that one as targets.
+            for &id in &self.graph.outgoing[target] {
+                targets.push((id, state.clone(), location_links.clone()));
+            }
+        }
+
+        // Arrange the nodes into a vector.
+        let count = self.nodes.len();
+        let default = AbstractLocation {
+            addr: 0, trace: Vec::new(),
+            location: StorageLocation::Direct(Register::RAX)
+        };
+        let mut nodes = vec![default; count];
+
+        for (node, index) in self.nodes.into_iter() {
+            nodes[index] = node;
+        }
+
+        ValueFlowGraph {
+            nodes,
+            edges: self.edges,
+        }
+    }
+
+    /// Add a node to the list. This
+    /// - inserts it and returns the new index if it didn't exist before
+    /// - finds the existing node and returns it's index
+    fn insert_node(&mut self, node: AbstractLocation) -> usize {
+        let new_index = self.nodes.len();
+        *self.nodes.entry(node).or_insert(new_index)
+    }
+
+    /// Adds edges between abstract locations that share the same storage
+    /// location and don't change in between their contexts.
+    fn connect_previous(
+        &mut self,
+        links: &mut HashMap<StorageLocation, usize>,
+        location: StorageLocation,
+        index: usize,
+    ) {
+        // We only consider direct registers here and not memory storage slots
+        // because eventhough they may have the same "location", i.e. the
+        // same address formula based on registers the actual address may
+        // differ depending on the register values.
+        if let StorageLocation::Indirect { .. } = location {
+            return;
+        }
+
+        // We make sure that different versions of the same register
+        // (like EAX and RAX) shared the same slot in the link map.
+        let location = location.normalized();
+
+        // Add a link to the previous abstract location of the same
+        // storage location if it was used before.
+        if let Some(prev) = links.get(&location) {
+            self.edges.insert((*prev, index), SymCondition::TRUE);
+        }
+
+        links.insert(location, index);
+    }
+}
+
+fn add_context(location: StorageLocation, addr: u64, trace: &[u64]) -> AbstractLocation {
+    AbstractLocation {
+        addr,
+        trace: trace.to_vec(),
+        location
     }
 }
 
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, File};
-    use std::process::Command;
     use crate::Program;
-    use crate::x86_64::Register;
-    use crate::math::Symbol;
     use crate::flow::visualize::test::compile;
-    use crate::flow::{StorageLocation};
     use super::*;
 
     fn test(filename: &str) {
         let path = format!("target/bin/{}", filename);
 
-        // Generate the flow graph.
         let program = Program::new(path);
         let control_graph = ControlFlowGraph::new(&program);
         let value_graph = ValueFlowGraph::new(&control_graph);
 
-        compile(&program, "target/value-flow", filename, |file| {
-            value_graph.visualize(file, &program, filename)
+        compile("target/value-flow", filename, |file| {
+            value_graph.visualize(file, filename)
         });
     }
 

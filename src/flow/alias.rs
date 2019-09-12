@@ -11,7 +11,6 @@ use super::{ControlFlowGraph, AbstractLocation, StorageLocation};
 use DataType::*;
 
 
-
 /// Maps all abstract locations to the conditions under which there is a
 /// memory access happening at them aliasing with the main access.
 #[derive(Debug, Clone)]
@@ -69,12 +68,7 @@ impl<'g> AliasExplorer<'g> {
                 let addr = *addr;
                 let next_addr = addr + len;
 
-                // Adjust the trace.
-                match instruction.mnemoic {
-                    Mnemoic::Call => state.trace.push(addr),
-                    Mnemoic::Ret => { state.trace.pop(); },
-                    _ => {},
-                };
+                state.track(&instruction, addr);
 
                 // Check for the target access.
                 if addr == self.target.addr && state.trace == self.target.trace {

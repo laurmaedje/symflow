@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 
-use crate::x86_64::Register;
+use crate::x86_64::{Instruction, Mnemoic, Register};
 use crate::ir::{MicroOperation, Location, Temporary, MemoryMapped};
 use crate::math::{Integer, DataType, SymExpr, SymCondition, Symbol, SharedSolver};
 use crate::flow::{AbstractLocation, StorageLocation};
@@ -99,6 +99,16 @@ impl SymState {
         None
     }
 
+    /// Adjust the trace based on the instruction.
+    pub fn track(&mut self, instruction: &Instruction, addr: u64) {
+        // Adjust the trace.
+        match instruction.mnemoic {
+            Mnemoic::Call => self.trace.push(addr),
+            Mnemoic::Ret => { self.trace.pop(); },
+            _ => {},
+        };
+    }
+
     /// Evaluate a symbolic expression with temporary symbols.
     pub fn evaluate_condition(&self, condition: &SymCondition) -> SymCondition {
         let mut evaluated = condition.clone();
@@ -114,7 +124,7 @@ impl SymState {
     pub fn get_access_for_location(&self, location: StorageLocation) -> Option<TypedMemoryAccess> {
         use StorageLocation::*;
         match location {
-            Direct(reg) => None,
+            Direct(_) => None,
             Indirect { data_type, base, scaled_offset, displacement } => Some({
                 let mut addr = self.get_reg(base);
 

@@ -4,6 +4,7 @@ use std::fmt::{self, Display, Formatter};
 use byteorder::{ByteOrder, LittleEndian};
 
 use crate::math::{Integer, DataType};
+use crate::flow::StorageLocation;
 use DataType::*;
 
 
@@ -59,6 +60,55 @@ impl Instruction {
     /// The byte length of the first instruction in the given slice.
     pub fn length(bytes: &[u8]) -> u64 {
         lde::X64.ld(bytes) as u64
+    }
+
+    /// Pairs of (source, sink) describing value flow in the instruction.
+    pub fn flows(&self) -> Vec<(StorageLocation, StorageLocation)> {
+        use Mnemoic::*;
+        use Register::*;
+
+        let loc = StorageLocation::from_operand;
+        let reg = StorageLocation::Direct;
+        fn both<T>(a: Option<T>, b: Option<T>) -> Vec<(T, T)> {
+            if let (Some(a), Some(b)) = (a, b) { vec![(a, b)] } else { vec![] }
+        }
+        macro_rules! get {
+            ($op:expr) => { if let Some(s) = loc($op) { s } else { return vec![] } };
+        }
+
+        match self.mnemoic {
+            Add | Sub | Imul => {
+                let target = get!(self.operands[0]);
+                self.operands.iter().skip(1)
+                    .filter_map(|&op| loc(op).map(|s| (s, target)))
+                    .collect()
+            },
+
+            Mov | Movzx | Movsx => both(loc(self.operands[1]), loc(self.operands[0])),
+
+            Cwde => vec![(reg(AX), reg(EAX))],
+            Cdqe => vec![(reg(EAX), reg(RAX))],
+
+            Push => {
+                let target = get!(self.operands[0]);
+                vec![(target, StorageLocation::Indirect {
+                    data_type: target.data_type(),
+                    base: RSP,
+                    scaled_offset: None,
+                    displacement: Some(target.data_type().bytes() as i64),
+                })]
+            },
+            Pop => {
+                let target = get!(self.operands[0]);
+                vec![(StorageLocation::indirect_reg(target.data_type(), RSP), target)]
+            },
+            Leave => vec![
+                (reg(EBP), reg(ESP)),
+                (StorageLocation::indirect_reg(N64, RSP), reg(RBP))
+            ],
+
+            _ => vec![],
+        }
     }
 }
 
@@ -453,6 +503,22 @@ impl Register {
             EAX | ECX | EDX | EBX | ESP | EBP | ESI | EDI | EIP => N32,
             AX | CX | DX | BX | SP | BP | SI | DI | IP => N16,
             AL | CL | DL | BL | AH | CH | DH | BH => N8,
+        }
+    }
+
+    /// The base (64-bit) version of the register.
+    pub fn base(self) -> Register {
+        use Register::*;
+        match self {
+            AL | AX | EAX => RAX,
+            CL | CX | ECX => RCX,
+            DL | DX | EDX => RDX,
+            BL | BX | EBX => RBX,
+            AH | SP | ESP => RSP,
+            CH | BP | EBP => RBP,
+            DH | SI | ESI => RSI,
+            BH | DI | EDI => RDI,
+            r => r
         }
     }
 

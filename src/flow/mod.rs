@@ -43,10 +43,10 @@ pub enum StorageLocation {
 
 impl StorageLocation {
     /// Create a storage location with just a simple indirect register.
-    pub fn indirect_reg(data_type: DataType, reg: Register) -> StorageLocation {
+    pub fn indirect_reg(data_type: DataType, base: Register) -> StorageLocation {
         StorageLocation::Indirect {
             data_type,
-            base: reg,
+            base,
             scaled_offset: None,
             displacement: None,
         }
@@ -70,11 +70,25 @@ impl StorageLocation {
             StorageLocation::Indirect { data_type, .. } => data_type,
         }
     }
+
+    /// Change to base 64-bit registers for direct storage.
+    ///
+    /// This can be useful for comparing storage locations with registers
+    /// that are not equal but share the same memory (like RAX and EAX).
+    pub fn normalized(self) -> StorageLocation {
+        match self {
+            StorageLocation::Direct(reg) => StorageLocation::Direct(reg.base()),
+            s => s,
+        }
+    }
 }
 
 impl Display for AbstractLocation {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{} at {:x} by ", self.location, self.addr)?;
+        write!(f, "{} at {:x}", self.location, self.addr)?;
+        if !self.trace.is_empty() {
+            write!(f, " by ")?;
+        }
         let mut first = true;
         for &addr in &self.trace {
             if !first { write!(f, " -> ")?; } first = false;

@@ -1,4 +1,4 @@
-//! A machine code flow analyzer 🚀 for the `x86_64` architecture based on symbolic execution.
+//! Value flow analysis for x86-64 ELF binaries based on symbolic execution 🚀
 
 #![allow(unused)]
 

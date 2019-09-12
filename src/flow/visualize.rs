@@ -1,11 +1,7 @@
 //! Visualization of flow graphs.
 
 use std::collections::HashMap;
-use std::io::{self, Result, Write};
-use std::fs::{self, File};
-use std::process::Command;
-
-use crate::Program;
+use std::io::{Result, Write};
 use crate::math::SymCondition;
 
 pub const BR: &str = "<br align=\"left\"/>";
@@ -22,17 +18,19 @@ pub fn write_header<W: Write>(mut f: W, title: &str) -> Result<()> {
 }
 
 /// Write condition edges.
-pub fn write_edges<W: Write>(mut f: W, edges: &HashMap<(usize, usize), SymCondition>) -> Result<()> {
+pub fn write_edges<W: Write, F>(
+    mut f: W,
+    edges: &HashMap<(usize, usize), SymCondition>,
+    writer: F
+) -> Result<()> where F: Fn(&mut W, ((usize, usize), &SymCondition)) -> Result<()> {
     // Export the edges, but sort them first to make the graphviz output
     // deterministic eventhough the hash map cannot be traversed in order.
     let mut edges = edges.iter().collect::<Vec<_>>();
     edges.sort_by_key(|edge| edge.0);
-    for ((start, end), condition) in edges {
+    for (&(start, end), condition) in edges {
         write!(f, "b{} -> b{} [", start, end)?;
-        if condition != &SymCondition::TRUE {
-            write!(f, "label=\"{}\", ", condition)?;
-        }
-        writeln!(f, "style=dashed, color=grey]")?;
+        writer(&mut f, ((start, end), &condition))?;
+        writeln!(f, "]")?;
     }
     Ok(())
 }
@@ -45,10 +43,12 @@ pub fn write_footer<W: Write>(mut f: W) -> Result<()> {
 
 #[cfg(test)]
 pub mod test {
+    use std::fs::{self, File};
+    use std::process::Command;
     use super::*;
 
     /// Compile the file with graphviz.
-    pub fn compile<F>(program: &Program, dir: &str, filename: &str, writer: F)
+    pub fn compile<F>(dir: &str, filename: &str, writer: F)
     where F: FnOnce(File) -> Result<()> {
         // Visualize the graph into a PDF file.
         fs::create_dir(dir).ok();
@@ -62,8 +62,8 @@ pub mod test {
             .arg(format!("{}/{}.pdf", dir, filename))
             .output()
             .expect("failed to run graphviz");
-        io::stdout().write_all(&output.stdout).unwrap();
-        io::stderr().write_all(&output.stderr).unwrap();
+        std::io::stdout().write_all(&output.stdout).unwrap();
+        std::io::stderr().write_all(&output.stderr).unwrap();
         fs::remove_file(flow_temp).unwrap();
     }
 }

@@ -117,7 +117,13 @@ impl ControlFlowGraph {
             writeln!(f, "]")?;
         }
 
-        write_edges(&mut f, &self.edges)?;
+        write_edges(&mut f, &self.edges, |f, (_, condition)| {
+            if condition != &SymCondition::TRUE {
+                write!(f, "label=\"{}\", ", condition)?;
+            }
+            write!(f, "color=grey")
+        })?;
+
         write_footer(&mut f)
     }
 }
@@ -481,8 +487,6 @@ fn decycle<T: Clone, F>(sequence: &[T], cmp: F) -> Vec<T> where F: Fn(&T, &T) ->
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, File};
-    use std::process::Command;
     use crate::flow::visualize::test::compile;
     use super::*;
 
@@ -493,7 +497,7 @@ mod tests {
         let program = Program::new(path);
         let graph = ControlFlowGraph::new(&program);
 
-        compile(&program, "target/control-flow", filename, |file| {
+        compile("target/control-flow", filename, |file| {
             graph.visualize(file, &program, filename, VisualizationStyle::Instructions)
         });
     }
