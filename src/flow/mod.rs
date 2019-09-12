@@ -1,13 +1,16 @@
-//! Data and control flow models.
+//! Control and value flow models.
 
 use std::fmt::{self, Display, Formatter};
 use crate::x86_64::{Register, Operand};
 use crate::math::DataType;
 
 mod control;
+mod alias;
 mod value;
+mod visualize;
 
 pub use control::*;
+pub use alias::*;
 pub use value::*;
 
 

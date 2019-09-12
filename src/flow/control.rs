@@ -13,9 +13,9 @@ use crate::sym::{SymState, MemoryStrategy, Event};
 
 /// The control flow graph representation of a program.
 #[derive(Debug, Clone)]
-pub struct FlowGraph {
+pub struct ControlFlowGraph {
     /// The nodes of the graph (i.e. basic blocks within a context).
-    pub nodes: Vec<FlowNode>,
+    pub nodes: Vec<ControlFlowNode>,
     /// The basic blocks without context.
     pub blocks: HashMap<u64, BasicBlock>,
     /// The control flow between the nodes. The key pairs are indices
@@ -29,17 +29,17 @@ pub struct FlowGraph {
 
 /// A node in the control flow graph, that is a basic block in some context.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct FlowNode {
+pub struct ControlFlowNode {
     /// The start address of the block.
     pub addr: u64,
     /// The call trace in (callsite, target) pairs.
     pub trace: Vec<(u64, u64)>,
 }
 
-impl FlowNode {
+impl ControlFlowNode {
     /// Return the same node but without cycles in the trace.
-    fn decycled(&self) -> FlowNode {
-        FlowNode {
+    fn decycled(&self) -> ControlFlowNode {
+        ControlFlowNode {
             addr: self.addr,
             trace: decycle(&self.trace, |a, b| a.1 == b.1)
         }
@@ -58,9 +58,9 @@ pub struct BasicBlock {
     pub code: Vec<(u64, u64, Instruction, Microcode)>,
 }
 
-impl FlowGraph {
-    /// Generate a flow graph of a program.
-    pub fn new(program: &Program) -> FlowGraph {
+impl ControlFlowGraph {
+    /// Generate a control flow graph of a program.
+    pub fn new(program: &Program) -> ControlFlowGraph {
         FlowConstructor::new(program).construct(program.entry)
     }
 
@@ -72,17 +72,10 @@ impl FlowGraph {
         title: &str,
         style: VisualizationStyle
     ) -> io::Result<()> {
-
-        // Rebind the target file for more shortness later on.
+        use super::visualize::*;
         let mut f = target;
-        const BR: &str = "<br align=\"left\"/>";
 
-        writeln!(f, "digraph Flow {{")?;
-        writeln!(f, "label=<Flow graph for {}<br/><br/>>", title)?;
-        writeln!(f, "labelloc=\"t\"")?;
-        writeln!(f, "graph [fontname=\"Source Code Pro\"]")?;
-        writeln!(f, "node [fontname=\"Source Code Pro\"]")?;
-        writeln!(f, "edge [fontname=\"Source Code Pro\"]")?;
+        write_header(&mut f, &format!("Control flow graph for {}", title))?;
 
         // Export the blocks.
         for (index, node) in self.nodes.iter().enumerate() {
@@ -124,23 +117,12 @@ impl FlowGraph {
             writeln!(f, "]")?;
         }
 
-        // Export the edges, but sort them first to make the graphviz output
-        // deterministic eventhough the hash map cannot be traversed in order.
-        let mut edges = self.edges.iter().collect::<Vec<_>>();
-        edges.sort_by_key(|edge| edge.0);
-        for ((start, end), condition) in edges {
-            write!(f, "b{} -> b{} [", start, end)?;
-            if condition != &SymCondition::TRUE {
-                write!(f, "label=\"{}\", ", condition)?;
-            }
-            writeln!(f, "style=dashed, color=grey]")?;
-        }
-
-        writeln!(f, "}}")
+        write_edges(&mut f, &self.edges)?;
+        write_footer(&mut f)
     }
 }
 
-/// How to visualize the flow graph.
+/// How to visualize the control flow graph.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum VisualizationStyle {
     /// Only display the addresses and call traces of blocks.
@@ -156,8 +138,8 @@ pub enum VisualizationStyle {
 struct FlowConstructor<'a> {
     binary: &'a [u8],
     base: u64,
-    stack: Vec<(FlowNode, Vec<usize>, SymState)>,
-    nodes: HashMap<FlowNode, usize>,
+    stack: Vec<(ControlFlowNode, Vec<usize>, SymState)>,
+    nodes: HashMap<ControlFlowNode, usize>,
     blocks: HashMap<u64, BasicBlock>,
     edges: HashMap<(usize, usize), SymCondition>,
 }
@@ -193,8 +175,8 @@ impl<'a> FlowConstructor<'a> {
     }
 
     /// Build the flow graph.
-    fn construct(mut self, entry: u64) -> FlowGraph {
-        let start_node = FlowNode {
+    fn construct(mut self, entry: u64) -> ControlFlowGraph {
+        let start_node = ControlFlowNode {
             addr: entry,
             trace: vec![],
         };
@@ -225,7 +207,7 @@ impl<'a> FlowConstructor<'a> {
 
         // Arrange the nodes into a vector.
         let count = self.nodes.len();
-        let mut nodes = vec![FlowNode { addr: 0, trace: Vec::new() }; count];
+        let mut nodes = vec![ControlFlowNode { addr: 0, trace: Vec::new() }; count];
         let mut incoming = vec![Vec::new(); count];
         let mut outgoing = vec![Vec::new(); count];
 
@@ -243,7 +225,7 @@ impl<'a> FlowConstructor<'a> {
         for inc in &mut incoming { inc.sort(); }
         for out in &mut outgoing { out.sort(); }
 
-        FlowGraph {
+        ControlFlowGraph {
             nodes,
             blocks: self.blocks,
             edges: self.edges,
@@ -253,7 +235,7 @@ impl<'a> FlowConstructor<'a> {
     }
 
     /// Parse the basic block at the beginning of the given binary code.
-    fn parse_block(&mut self, node: FlowNode, state: &mut SymState) -> Option<Exit> {
+    fn parse_block(&mut self, node: ControlFlowNode, state: &mut SymState) -> Option<Exit> {
         let mut parser = if let Some(block) = self.blocks.get(&node.addr) {
             BlockParser::from_block(block)
         } else {
@@ -318,7 +300,7 @@ impl<'a> FlowConstructor<'a> {
     /// of the just parsed block.
     fn explore_exit(
         &mut self,
-        node: FlowNode,
+        node: ControlFlowNode,
         path: &[usize],
         exit: Exit,
         state: SymState
@@ -362,7 +344,7 @@ impl<'a> FlowConstructor<'a> {
         jumpsite: u64,
         kind: ExitKind,
         condition: SymCondition,
-        node: FlowNode,
+        node: ControlFlowNode,
         path: &[usize],
         state: &SymState
     ) {
@@ -373,7 +355,7 @@ impl<'a> FlowConstructor<'a> {
             .filter(|&&jump| jump == (jumpsite, addr)).count() >= 2;
 
         // Assemble the new ID.
-        let mut target_node = FlowNode {
+        let mut target_node = ControlFlowNode {
             addr,
             trace: node.trace.clone(),
         };
@@ -501,6 +483,7 @@ fn decycle<T: Clone, F>(sequence: &[T], cmp: F) -> Vec<T> where F: Fn(&T, &T) ->
 mod tests {
     use std::fs::{self, File};
     use std::process::Command;
+    use crate::flow::visualize::test::compile;
     use super::*;
 
     fn test(filename: &str) {
@@ -508,27 +491,15 @@ mod tests {
 
         // Generate the flow graph.
         let program = Program::new(path);
-        let graph = FlowGraph::new(&program);
+        let graph = ControlFlowGraph::new(&program);
 
-        // Visualize the graph into a PDF file.
-        fs::create_dir("target/control-flow").ok();
-        let flow_temp = "target/temp-flow.gv";
-        let flow_file = File::create(flow_temp).unwrap();
-        graph.visualize(flow_file, &program, filename, VisualizationStyle::Instructions).unwrap();
-        let output = Command::new("dot")
-            .arg("-Tpdf")
-            .arg(flow_temp)
-            .arg("-o")
-            .arg(format!("target/control-flow/{}.pdf", filename))
-            .output()
-            .expect("failed to run graphviz");
-        io::stdout().write_all(&output.stdout).unwrap();
-        io::stderr().write_all(&output.stderr).unwrap();
-        fs::remove_file(flow_temp).unwrap();
+        compile(&program, "target/control-flow", filename, |file| {
+            graph.visualize(file, &program, filename, VisualizationStyle::Instructions)
+        });
     }
 
     #[test]
-    fn flow_graph() {
+    fn control_flow_graph() {
         test("block-1");
         test("block-2");
         test("case");
