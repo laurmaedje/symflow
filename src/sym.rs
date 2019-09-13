@@ -6,7 +6,7 @@ use std::fmt::{self, Display, Formatter};
 
 use crate::x86_64::{Instruction, Mnemoic, Register};
 use crate::ir::{MicroOperation, Location, Temporary, MemoryMapped};
-use crate::math::{Integer, DataType, SymExpr, SymCondition, Symbol, SharedSolver};
+use crate::math::{Integer, DataType, SymExpr, SymCondition, Symbol, SharedSolver, Traversed};
 use crate::flow::{AbstractLocation, StorageLocation};
 use DataType::*;
 
@@ -119,6 +119,19 @@ impl SymState {
             sym => SymExpr::Sym(sym),
         });
         evaluated
+    }
+
+    /// Generate a symbol map with just the symbols needed for the condition.
+    pub fn symbol_map_for(&self, condition: &SymCondition) -> SymbolMap {
+        let mut symbols = HashMap::new();
+        condition.traverse(&mut |node| {
+            if let Traversed::Expr(&SymExpr::Sym(symbol)) = node {
+                if let Some(loc) = self.symbol_map.get(&symbol) {
+                    symbols.insert(symbol, loc.clone());
+                }
+            }
+        });
+        symbols
     }
 
     /// Return the address expression and data type of the storage location if
@@ -372,7 +385,6 @@ impl SymMemory {
             // If we traversed the whole map without hitting a perfect match, the
             // accessed memory is possibly still uninitialized. In this case, we
             // generate a new symbol and put it in as the last leaf of the tree.
-
             condition_map.sort_by_key(|(_, entry)| std::cmp::Reverse(entry.epoch));
 
             let mut end = 0;

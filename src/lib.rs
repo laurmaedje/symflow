@@ -141,7 +141,7 @@ mod tests {
 
     fn test(filename: &str) {
         let path = format!("target/bin/{}", filename);
-        println!("{}: {}\n", filename, Program::new(path));
+        Program::new(path);
     }
 
     #[test]

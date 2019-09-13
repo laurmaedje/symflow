@@ -47,6 +47,7 @@ impl ValueFlowGraph {
                 StdioKind::Stdin => "#4caf50",
                 StdioKind::Stdout => "#03a9f4",
             };
+
             writeln!(f, "k{} [label=<<b>{}</b>>, shape=box, style=filled, fillcolor=\"{}\"]",
                 index, symbol, color)?;
 
@@ -125,7 +126,7 @@ impl<'g> ValueFlowExplorer<'g> {
     /// All direct flows are translated into edges with condition _True_ in the
     /// graph. Indirect flows through memory can have more complex conditions
     /// associated with them.
-    pub fn run(mut self) -> ValueFlowGraph {
+    fn run(mut self) -> ValueFlowGraph {
         let base_state = SymState::new(MemoryStrategy::ConditionalTrees, self.solver.clone());
 
         let mut targets = vec![ExplorationTarget {
@@ -270,7 +271,7 @@ impl<'g> ValueFlowExplorer<'g> {
         &mut self,
         exp: &ExplorationTarget,
         access: TypedMemoryAccess,
-        location_index: usize,
+        location_index: usize
     ) {
         for (prev_index, prev, num_preconditions) in exp.write_accesses.iter().rev() {
             let edge = (*prev_index, location_index);

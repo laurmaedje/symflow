@@ -14,7 +14,7 @@ use crate::sym::{SymState, MemoryStrategy, Event};
 /// The control flow graph representation of a program.
 #[derive(Debug, Clone)]
 pub struct ControlFlowGraph {
-    /// The nodes of the graph (i.e. basic blocks within a context).
+    /// The basic blocks in their respective contexts.
     pub nodes: Vec<ControlFlowNode>,
     /// The basic blocks without context.
     pub blocks: HashMap<u64, BasicBlock>,
@@ -30,7 +30,8 @@ pub struct ControlFlowGraph {
 /// A node in the control flow graph, that is a basic block in some context.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ControlFlowNode {
-    /// The start address of the block.
+    /// The start address of the block. Can be used as an index
+    /// into the `blocks` hash map of the graph.
     pub addr: u64,
     /// The call trace in (callsite, target) pairs.
     pub trace: Vec<(u64, u64)>,
@@ -61,7 +62,7 @@ pub struct BasicBlock {
 impl ControlFlowGraph {
     /// Generate a control flow graph of a program.
     pub fn new(program: &Program) -> ControlFlowGraph {
-        FlowConstructor::new(program).construct(program.entry)
+        ControlFlowExplorer::new(program).run()
     }
 
     /// Visualize this flow graph in a graphviz DOT file.
@@ -139,19 +140,24 @@ pub enum VisualizationStyle {
     Microcode,
 }
 
-/// Constructs a flow graph representation of a program.
-#[derive(Debug, Clone)]
-struct FlowConstructor<'a> {
-    binary: &'a [u8],
-    base: u64,
-    stack: Vec<(ControlFlowNode, Vec<usize>, SymState)>,
+/// Constructs a control flow graph representation of a program.
+#[derive(Clone)]
+struct ControlFlowExplorer<'a> {
+    program: &'a Program,
+    stack: Vec<ExplorationTarget>,
     nodes: HashMap<ControlFlowNode, usize>,
     blocks: HashMap<u64, BasicBlock>,
     edges: HashMap<(usize, usize), SymCondition>,
 }
 
-/// An exit of a block.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+struct ExplorationTarget {
+    node: ControlFlowNode,
+    state: SymState,
+    path: Vec<usize>,
+}
+
+#[derive(Clone)]
 struct Exit {
     target: SymExpr,
     jumpsite: u64,
@@ -159,20 +165,17 @@ struct Exit {
     kind: ExitKind,
 }
 
-/// How the block is exited.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone)]
 enum ExitKind {
     Call,
     Return,
     Jump,
 }
 
-impl<'a> FlowConstructor<'a> {
-    /// Construct a new flow graph builder.
-    fn new(program: &'a Program) -> FlowConstructor<'a> {
-        FlowConstructor {
-            binary: &program.binary,
-            base: program.base,
+impl<'a> ControlFlowExplorer<'a> {
+    fn new(program: &'a Program) -> ControlFlowExplorer<'a> {
+        ControlFlowExplorer {
+            program,
             blocks: HashMap::new(),
             nodes: HashMap::new(),
             edges: HashMap::new(),
@@ -180,48 +183,39 @@ impl<'a> FlowConstructor<'a> {
         }
     }
 
-    /// Build the flow graph.
-    fn construct(mut self, entry: u64) -> ControlFlowGraph {
-        let start_node = ControlFlowNode {
-            addr: entry,
-            trace: vec![],
-        };
+    /// Build the control flow graph.
+    fn run(mut self) -> ControlFlowGraph {
+        let node = ControlFlowNode { addr: self.program.entry, trace: vec![], };
+        let base_state = SymState::new(MemoryStrategy::PerfectMatches, Rc::new(Solver::new()));
 
-        let base_state = SymState::new(
-            MemoryStrategy::PerfectMatches,
-            Rc::new(Solver::new())
-        );
+        self.stack.push(ExplorationTarget {
+            node,
+            state: base_state,
+            path: Vec::new(),
+        });
 
-        self.stack.push((start_node, vec![], base_state));
-
-        while let Some((node, path, mut state)) = self.stack.pop() {
-            let decycled = node.decycled();
-
-            // Parse the first block.
-            let maybe_exit = self.parse_block(decycled.clone(), &mut state);
-
-            // Add the block to the map if we have not already found it
-            // through another path with the same call site and call trace.
-            let new_id = self.nodes.len();
-            self.nodes.entry(decycled).or_insert(new_id);
-
-            // Add blocks reachable from this one.
-            if let Some(exit) = maybe_exit {
-                self.explore_exit(node, &path, exit, state);
+        while let Some(mut exp) = self.stack.pop() {
+            // Explore this block and find all the ones reachable from this one.
+            if let Some(exit) = self.execute_block(&mut exp) {
+                self.explore_exit(&exp, exit);
             }
         }
 
+        self.finish()
+    }
+
+    /// Arrange all data in the way expected for the flow graph.
+    fn finish(self) -> ControlFlowGraph {
         // Arrange the nodes into a vector.
         let count = self.nodes.len();
         let mut nodes = vec![ControlFlowNode { addr: 0, trace: Vec::new() }; count];
-        let mut incoming = vec![Vec::new(); count];
-        let mut outgoing = vec![Vec::new(); count];
-
         for (node, index) in self.nodes.into_iter() {
             nodes[index] = node;
         }
 
         // Add the outgoing and incoming edges to the nodes.
+        let mut incoming = vec![Vec::new(); count];
+        let mut outgoing = vec![Vec::new(); count];
         for &(start, end) in self.edges.keys() {
             outgoing[start].push(end);
             incoming[end].push(start);
@@ -240,12 +234,16 @@ impl<'a> FlowConstructor<'a> {
         }
     }
 
-    /// Parse the basic block at the beginning of the given binary code.
-    fn parse_block(&mut self, node: ControlFlowNode, state: &mut SymState) -> Option<Exit> {
-        let mut parser = if let Some(block) = self.blocks.get(&node.addr) {
-            BlockParser::from_block(block)
-        } else {
-            BlockParser::from_binary(&self.binary, self.base, node.addr)
+    /// Parse and execute the basic block determined by the exploration
+    /// target and find all exits. Returns `None` if there is no exit to
+    /// a new block, that is, if there was a sys_exit.
+    fn execute_block(&mut self, exp: &mut ExplorationTarget) -> Option<Exit> {
+        // Create a new binary parser or reuse an existing block.
+        let mut parser = match self.blocks.get(&exp.node.addr) {
+            Some(block) => BlockParser::from_block(block),
+            None => {
+                BlockParser::from_binary(&self.program.binary, self.program.base, exp.node.addr)
+            },
         };
 
         // Symbolically execute the block until an exit is found.
@@ -254,143 +252,122 @@ impl<'a> FlowConstructor<'a> {
 
             // Execute the microcode.
             for op in &microcode.ops {
-                // Do one single microcode step.
                 let next_addr = addr + len;
-                let maybe_event = state.step(next_addr, op);
 
-                // Check for exiting.
-                let maybe_exit = self.parse_event(maybe_event, instruction, *addr, next_addr);
-                if let Some(exit) = maybe_exit {
-                    if let Some(block) = parser.export() {
-                        self.blocks.insert(node.addr, block);
+                if let Some(event) = exp.state.step(next_addr, op) {
+                    if let Some(exit) = self.find_exits(event, instruction, *addr, next_addr) {
+                        if let Some(block) = parser.export() {
+                            self.blocks.insert(exp.node.addr, block);
+                        }
+                        return exit;
                     }
-                    return exit;
                 }
             }
         }
     }
 
-    /// Determine the kind of exit resulting from a symbolic execution event.
-    fn parse_event(
+    /// Determine the kind of exit resulting from a symbolic execution event:
+    /// - Returns Some(Some(exit)) if there are new blocks resulting.
+    /// - Returns Some(None) if it exited without new blocks (sys_exit).
+    /// - Returns None if it was no exit at all.
+    fn find_exits(
         &self,
-        maybe_event: Option<Event>,
+        event: Event,
         inst: &Instruction,
         current_addr: u64,
         next_addr: u64
     ) -> Option<Option<Exit>> {
-
-        match maybe_event {
+        match event {
             // If it is a jump, add the exit to the list.
-            Some(Event::Jump { target, condition, relative }) => Some(
-                Some(Exit {
-                    target: if relative {
-                        target.clone().add(SymExpr::Int(Integer::from_ptr(next_addr)))
-                    } else {
-                        target.clone()
-                    },
-                    kind: match inst.mnemoic {
-                        Mnemoic::Call => ExitKind::Call,
-                        Mnemoic::Ret => ExitKind::Return,
-                        _ => ExitKind::Jump,
-                    },
-                    jumpsite: current_addr,
-                    condition,
-                })
-            ),
-            Some(Event::Exit) => Some(None),
+            Event::Jump { target, condition, relative } => Some(Some(Exit {
+                target: if relative {
+                    target.clone().add(SymExpr::Int(Integer::from_ptr(next_addr)))
+                } else {
+                    target.clone()
+                },
+                kind: match inst.mnemoic {
+                    Mnemoic::Call => ExitKind::Call,
+                    Mnemoic::Ret => ExitKind::Return,
+                    _ => ExitKind::Jump,
+                },
+                jumpsite: current_addr,
+                condition,
+            })),
+            Event::Exit => Some(None),
             _ => None,
         }
     }
 
     /// Add reachable blocks to the stack depending on the exit conditions
     /// of the just parsed block.
-    fn explore_exit(
-        &mut self,
-        node: ControlFlowNode,
-        path: &[usize],
-        exit: Exit,
-        state: SymState
-    ) {
-        match exit.target {
-            SymExpr::Int(Integer(DataType::N64, target)) => {
-                // Try the not-jumping path if it is viable.
-                if exit.condition != SymCondition::TRUE {
-                    let len = self.blocks[&node.addr].len;
-                    self.explore_acyclic(
-                        node.addr + len,
-                        exit.jumpsite,
-                        exit.kind,
-                        state.solver.simplify_condition(&exit.condition.clone().not()),
-                        node.clone(),
-                        path,
-                        &state
-                    );
-                }
+    fn explore_exit(&mut self, exp: &ExplorationTarget, exit: Exit) {
+        if let SymExpr::Int(Integer(DataType::N64, target)) = exit.target {
+            // Try the not-jumping path if it is viable.
+            if exit.condition != SymCondition::TRUE {
+                let len = self.blocks[&exp.node.addr].len;
 
-                // Try the jumping path.
-                self.explore_acyclic(
-                    target,
-                    exit.jumpsite,
-                    exit.kind,
-                    exit.condition,
-                    node,
-                    path,
-                    &state
-                );
-            },
+                let condition = exit.condition.clone().not();
+                let cond = exp.state.solver.simplify_condition(&condition);
+                self.explore_acyclic(&exp, exp.node.addr + len, exit.jumpsite, exit.kind, cond);
+            }
 
-            _ => panic!("handle_exit: unresolved jump target: {}", exit.target),
+            // Try the jumping path anyways.
+            self.explore_acyclic(&exp, target, exit.jumpsite, exit.kind, exit.condition);
+        } else {
+            panic!("handle_exit: unresolved jump target: {}", exit.target);
         }
     }
 
-    /// Add a target to the stack if it was not visited already through some kind of cycle.
+    /// Add a target to the search stack if it was not visited already
+    /// through some kind of cycle.
     fn explore_acyclic(
         &mut self,
+        exp: &ExplorationTarget,
         addr: u64,
         jumpsite: u64,
-        kind: ExitKind,
-        condition: SymCondition,
-        node: ControlFlowNode,
-        path: &[usize],
-        state: &SymState
+        exit_kind: ExitKind,
+        condition: SymCondition
     ) {
-        // Check if we are already recursing.
-        // We allow to recursive twice because we want to capture the returns
-        // of the recursing function to itself and the outside.
-        let fully_recursive = node.trace.iter()
-            .filter(|&&jump| jump == (jumpsite, addr)).count() >= 2;
-
-        // Assemble the new ID.
-        let mut target_node = ControlFlowNode {
-            addr,
-            trace: node.trace.clone(),
-        };
-
-        // Adjust the trace.
-        match kind {
+        // Assemble the new node.
+        let mut target_node = ControlFlowNode { addr, trace: exp.node.trace.clone() };
+        match exit_kind {
             ExitKind::Call => target_node.trace.push((jumpsite, addr)),
             ExitKind::Return => { target_node.trace.pop(); },
             _ => {},
         }
 
         // Insert a new edge for the jump.
-        let new = self.nodes.len();
-        let start = *self.nodes.entry(node.decycled()).or_insert(new);
-        let new = self.nodes.len();
-        let end = *self.nodes.entry(target_node.decycled()).or_insert(new);
+        let start = self.insert_node(exp.node.decycled());
+        let end = self.insert_node(target_node.decycled());
         self.edges.insert((start, end), condition);
 
         // Only consider the target if it is acyclic or recursing in the allowed limits.
-        let looping = path.contains(&end);
+        let looping = exp.path.contains(&end);
+        if !looping {
+            // Check if we are already recursing.
+            // We allow to recursive twice because we want to capture the returns
+            // of the recursing function to itself and the outside.
+            let fully_recursive = exp.node.trace.iter()
+                .filter(|&&jump| jump == (jumpsite, addr)).count() >= 2;
 
-        if !looping && !fully_recursive {
-            // Add the current block to the path.
-            let mut path = path.to_vec();
-            path.push(start);
+            if !fully_recursive {
+                // Add the current block to the path.
+                let mut path = exp.path.to_vec();
+                path.push(start);
 
-            // Put the new target on top of the search stack.
-            self.stack.push((target_node, path, state.clone()));
+                self.stack.push(ExplorationTarget {
+                    node: target_node,
+                    path,
+                    state: exp.state.clone(),
+                });
+            }
         }
+    }
+
+    /// Add a node to the list.
+    fn insert_node(&mut self, node: ControlFlowNode) -> usize {
+        let new_index = self.nodes.len();
+        *self.nodes.entry(node).or_insert(new_index)
     }
 }
 
@@ -413,10 +390,7 @@ enum BlockParser<'a> {
 impl<'a> BlockParser<'a> {
     /// Create a new block parser from an existing block.
     fn from_block(block: &'a BasicBlock) -> BlockParser {
-        BlockParser::BasicBlock {
-            block,
-            index: 0,
-        }
+        BlockParser::BasicBlock { block, index: 0 }
     }
 
     /// Create a new block parser from unparsed binary.
@@ -467,7 +441,8 @@ impl<'a> BlockParser<'a> {
 }
 
 /// Remove all cycles from a list of comparable items, where `cmp` determines
-/// if two items are equal.
+/// if two items are equal. For example this turns 1 -> 2 -> 3 -> 2 -> 4 into
+/// 1 -> 2 -> 4.
 fn decycle<T: Clone, F>(sequence: &[T], cmp: F) -> Vec<T> where F: Fn(&T, &T) -> bool {
     let mut out = Vec::new();
 

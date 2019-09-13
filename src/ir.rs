@@ -567,10 +567,6 @@ mod tests {
         let instruction = Instruction::decode(bytes).unwrap();
         let code = encoder.encode(&instruction).unwrap();
         let display = codify(display);
-        println!("==================================");
-        println!("Instruction: {:#02x?}", bytes);
-        println!("Encoded: {}", code);
-        println!("Display: {}\n", display);
         assert_eq!(code.to_string(), display);
     }
 

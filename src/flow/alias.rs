@@ -33,8 +33,15 @@ struct AliasExplorer<'g> {
     solver: SharedSolver,
 }
 
+#[derive(Clone)]
+struct ExplorationTarget {
+    target: usize,
+    state: SymState,
+    preconditions: Vec<SymCondition>,
+    target_access: Option<(TypedMemoryAccess, usize)>,
+}
+
 impl<'g> AliasExplorer<'g> {
-    /// Create a new alias explorer.
     fn new(graph: &'g ControlFlowGraph, target: &'g AbstractLocation) -> AliasExplorer<'g> {
         AliasExplorer {
             graph,
@@ -44,8 +51,8 @@ impl<'g> AliasExplorer<'g> {
         }
     }
 
-    /// Build an alias flow map for the target.
-    pub fn run(mut self) -> AliasMap {
+    /// Build an alias map for the target access.
+    fn run(mut self) -> AliasMap {
         // Find all nodes that can be backwards reached from first or second to
         // narrow down the search.
         let relevant = self.find_reachable_nodes();
@@ -56,11 +63,17 @@ impl<'g> AliasExplorer<'g> {
         // - a blank state
         // - no address yet for the target access
         let base_state = SymState::new(MemoryStrategy::ConditionalTrees, self.solver.clone());
-        let mut targets = vec![(0, SymCondition::TRUE, base_state, None)];
+
+        let mut targets = vec![ExplorationTarget {
+            target: 0,
+            state: base_state,
+            preconditions: Vec::new(),
+            target_access: None,
+        }];
 
         // Explore the relevant part of the flow graph in search of the memory accesses.
-        while let Some((target, pre, mut state, mut target_mem)) = targets.pop() {
-            let node = &self.graph.nodes[target];
+        while let Some(mut exp) = targets.pop() {
+            let node = &self.graph.nodes[exp.target];
             let block = &self.graph.blocks[&node.addr];
 
             // Simulate a basic block.
@@ -68,54 +81,48 @@ impl<'g> AliasExplorer<'g> {
                 let addr = *addr;
                 let next_addr = addr + len;
 
-                state.track(&instruction, addr);
-
                 // Check for the target access.
-                if addr == self.target.addr && state.trace == self.target.trace {
-                    let access = state.get_access_for_location(self.target.storage)
+                let is_target = addr == self.target.addr && exp.state.trace == self.target.trace;
+
+                if is_target {
+                    let access = exp.state
+                        .get_access_for_location(self.target.storage)
                         .expect("expected memory access at target");
-                    target_mem = Some(access);
 
-                // Check for another access.
+                    exp.target_access = Some((access, exp.preconditions.len()));
                 } else {
-                    use Mnemoic::*;
-                    if [Mov, Movzx, Movsx].contains(&instruction.mnemoic) {
-                        let source = instruction.operands[1];
-
-                        if let Some(storage) = StorageLocation::from_operand(source) {
-                            if let Some(access) = state.get_access_for_location(storage) {
-                                // There is a memory access.
-                                let location = AbstractLocation {
-                                    addr,
-                                    trace: state.trace.clone(),
-                                    storage,
-                                };
-
-                                self.handle_access(
-                                    target_mem.as_ref(),
-                                    access,
-                                    location,
-                                    &pre,
-                                    &state
-                                );
-                            }
+                    for (source, _) in instruction.flows() {
+                        if let Some(access) = exp.state.get_access_for_location(source) {
+                            let trace = exp.state.trace.clone();
+                            let location = AbstractLocation::new(addr, trace, source);
+                            self.handle_read_access(&exp, access, location);
                         }
                     }
                 }
 
+                exp.state.track(&instruction, addr);
+
                 // Execute the microcode for the instruction.
                 for op in &microcode.ops {
-                    state.step(next_addr, op);
+                    exp.state.step(next_addr, op);
                 }
             }
 
             // Add all nodes reachable from that one as targets.
-            for &id in &self.graph.outgoing[target] {
+            for &id in &self.graph.outgoing[exp.target] {
                 if relevant.contains(&id) {
-                    let condition = &self.graph.edges[&(target, id)];
-                    let evaluated = state.evaluate_condition(condition);
-                    let new_pre = self.solver.simplify_condition(&pre.clone().and(evaluated));
-                    targets.push((id, new_pre, state.clone(), target_mem.clone()));
+                    let condition = &self.graph.edges[&(exp.target, id)];
+                    let evaluated = exp.state.evaluate_condition(condition);
+
+                    let mut preconditions = exp.preconditions.clone();
+                    preconditions.push(evaluated);
+
+                    targets.push(ExplorationTarget {
+                        target: id,
+                        state: exp.state.clone(),
+                        preconditions,
+                        target_access: exp.target_access.clone(),
+                    });
                 }
             }
         }
@@ -123,37 +130,34 @@ impl<'g> AliasExplorer<'g> {
         AliasMap { map: self.map }
     }
 
-    /// Compute the condition for a memory access and add it to the map.
-    fn handle_access(
+
+
+    /// Compute the condition in which a memory access aliases with the target access
+    /// and add this condition to the map.
+    fn handle_read_access(
         &mut self,
-        target: Option<&TypedMemoryAccess>,
+        exp: &ExplorationTarget,
         access: TypedMemoryAccess,
-        location: AbstractLocation,
-        pre: &SymCondition,
-        state: &SymState,
+        location: AbstractLocation
     ) {
-        let aliasing = if let Some(target_access) = target {
-            determine_aliasing_condition(&self.solver, target_access, &access).0
+        let condition = if let Some((target_access, num_preconditions)) = &exp.target_access {
+            let mut condition =
+                determine_aliasing_condition(&self.solver, &target_access, &access).0;
+
+            for pre in &exp.preconditions[*num_preconditions..] {
+                condition = condition.and(pre.clone());
+            }
+
+            if let Some((prev, _)) = self.map.remove(&location) {
+                condition = prev.or(condition);
+            }
+
+            self.solver.simplify_condition(&condition)
         } else {
             SymCondition::FALSE
         };
 
-        let local_condition = pre.clone().and(aliasing);
-
-        let condition = self.solver.simplify_condition(&match self.map.remove(&location) {
-            Some((previous, _)) => previous.or(local_condition),
-            None => local_condition,
-        });
-
-        let mut symbols = HashMap::new();
-        condition.traverse(&mut |node| {
-            if let Traversed::Expr(&SymExpr::Sym(symbol)) = node {
-                if let Some(loc) = state.symbol_map.get(&symbol) {
-                    symbols.insert(symbol, loc.clone());
-                }
-            }
-        });
-
+        let symbols = exp.state.symbol_map_for(&condition);
         self.map.insert(location, (condition, symbols));
     }
 
