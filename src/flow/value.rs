@@ -5,10 +5,11 @@ use std::io::{self, Write};
 use std::rc::Rc;
 
 use crate::x86_64::Register;
-use crate::math::{SymCondition, Symbol, SharedSolver, Solver};
+use crate::math::{SymCondition, Symbol, SharedSolver, Solver, DataType};
 use crate::sym::{SymState, Event, MemoryStrategy, TypedMemoryAccess, StdioKind};
 use super::{ControlFlowGraph, AbstractLocation, StorageLocation};
 use super::alias::determine_aliasing_condition;
+use DataType::*;
 
 
 /// Contains the conditions under which values flow between abstract locations.
@@ -67,9 +68,9 @@ impl ValueFlowGraph {
                 write!(f, "label=\"{}\", ", condition)?;
             }
             if self.nodes[start].storage.normalized() == self.nodes[end].storage.normalized() {
-                write!(f, "style=dashed, ")?;
+                write!(f, "style=dashed, color=\"#ababab\"")?;
             }
-            write!(f, "color=grey")
+            Ok(())
         })?;
 
         write_footer(&mut f)
@@ -89,11 +90,20 @@ struct ValueFlowExplorer<'g> {
 struct ExplorationTarget {
     target: usize,
     state: SymState,
+
+    /// The set of all conditions (through ifs) met on this path.
+    preconditions: Vec<SymCondition>,
+
+    /// For each storage location that was already used we stored the abstract
+    /// location node were it was written, so we can add an edge back to it
+    /// when we use this storage.
     location_links: HashMap<StorageLocation, usize>,
 
     /// All past writing memory accesses with their abstract location index (node id).
-    /// Whenever a reading memory access happens we can compare it with all these.
-    write_accesses: Vec<(usize, TypedMemoryAccess)>
+    /// The last usize holds the number of preconditions that were already active
+    /// when this access happened. This allows us to discern the new preconditions
+    /// for a read access from those that already were before.
+    write_accesses: Vec<(usize, TypedMemoryAccess, usize)>
 }
 
 impl<'g> ValueFlowExplorer<'g> {
@@ -121,6 +131,7 @@ impl<'g> ValueFlowExplorer<'g> {
         let mut targets = vec![ExplorationTarget {
             target: 0,
             state: base_state,
+            preconditions: Vec::new(),
             location_links: HashMap::new(),
             write_accesses: Vec::new(),
         }];
@@ -134,13 +145,19 @@ impl<'g> ValueFlowExplorer<'g> {
                 let addr = *addr;
                 let next_addr = addr + len;
 
-                exp.state.track(&instruction, addr);
-
                 for (source, sink) in instruction.flows() {
-                    let source_node = AbstractLocation::new(addr, exp.state.trace.clone(), source);
                     let sink_node = AbstractLocation::new(addr, exp.state.trace.clone(), sink);
-                    let source_index = self.insert_node(source_node);
                     let sink_index = self.insert_node(sink_node);
+
+                    // If source and sink are basically the same, there is only a
+                    // stay-flow to be linked.
+                    if source.normalized() == sink.normalized() {
+                        self.link_location(&mut exp, sink, sink_index, false);
+                        continue;
+                    }
+
+                    let source_node = AbstractLocation::new(addr, exp.state.trace.clone(), source);
+                    let source_index = self.insert_node(source_node);
 
                     // Connect the abstract locations to their previous abstract
                     // location with the same storage location.
@@ -154,7 +171,7 @@ impl<'g> ValueFlowExplorer<'g> {
                     // Writing memory accesses are stored in the `write_accesses` list
                     // so we can check aliasing with reading accesses later on.
                     if let Some(access) = exp.state.get_access_for_location(sink) {
-                        exp.write_accesses.push((sink_index, access));
+                        exp.write_accesses.push((sink_index, access, exp.preconditions.len()));
                     }
 
                     // For reading memory accesses we need to check if they alias
@@ -164,6 +181,9 @@ impl<'g> ValueFlowExplorer<'g> {
                     }
                 }
 
+                exp.state.track(&instruction, addr);
+
+                // Execute the instruction.
                 for op in &microcode.ops {
                     if let Some(event) = exp.state.step(next_addr, op) {
                         match event {
@@ -176,13 +196,30 @@ impl<'g> ValueFlowExplorer<'g> {
 
             // Add all nodes reachable from that one as targets.
             for &id in &self.graph.outgoing[exp.target] {
+                let condition = &self.graph.edges[&(exp.target, id)];
+
+                // If the arrow to the next basic block has a condition, we
+                // have an additional precondition which we AND with the existing one.
+                let evaluated = exp.state.evaluate_condition(condition);
+
+                let mut preconditions = exp.preconditions.clone();
+                preconditions.push(evaluated);
+
                 targets.push(ExplorationTarget {
                     target: id,
-                    .. exp.clone()
+                    state: exp.state.clone(),
+                    preconditions,
+                    location_links: exp.location_links.clone(),
+                    write_accesses: exp.write_accesses.clone(),
                 });
             }
         }
 
+        self.finish()
+    }
+
+    /// Arrange all data in the way expected for the flow graph.
+    fn finish(self) -> ValueFlowGraph {
         // Arrange the I/O into a vector.
         let mut io: Vec<_> = self.io.iter()
             .map(|(loc, &(kind, symbol))| (self.nodes[loc], kind, symbol))
@@ -219,7 +256,7 @@ impl<'g> ValueFlowExplorer<'g> {
             // If it is a stdin read, that is, a memory write, add it
             // to the write access list.
             match kind {
-                StdioKind::Stdin => exp.write_accesses.push((index, access)),
+                StdioKind::Stdin => exp.write_accesses.push((index, access, exp.preconditions.len())),
                 StdioKind::Stdout => self.handle_read_access(exp, access, index),
             }
 
@@ -235,11 +272,36 @@ impl<'g> ValueFlowExplorer<'g> {
         access: TypedMemoryAccess,
         location_index: usize,
     ) {
-        for (prev_index, prev) in &exp.write_accesses {
-            let condition = determine_aliasing_condition(&self.solver, prev, &access);
+        for (prev_index, prev, num_preconditions) in exp.write_accesses.iter().rev() {
+            let edge = (*prev_index, location_index);
+
+            let (mut condition, perfect_match) =
+                determine_aliasing_condition(&self.solver, prev, &access);
+
+            // Any condition that has to be met on this path *additionally* to those
+            // already active for the current write have to be included in the condition.
+            for pre in &exp.preconditions[*num_preconditions..] {
+                condition = condition.and(pre.clone());
+            }
+
+            // There may already be another condition for this edge because we reached
+            // it through a different path. If so, both are valid and we have
+            // to take the disjunction of them.
+            if let Some(prev) = self.edges.remove(&edge) {
+                condition = prev.or(condition);
+            }
+
+            condition = self.solver.simplify_condition(&condition);
 
             if condition != SymCondition::FALSE {
-                self.edges.insert((*prev_index, location_index), condition);
+                self.edges.insert(edge, condition);
+            }
+
+            // If the pointers alias in *any* case and both accesses are the same
+            // width this write would have definitely overwritten any previous one
+            // and we can quit this loop safely.
+            if perfect_match {
+                break;
             }
         }
     }
@@ -254,11 +316,11 @@ impl<'g> ValueFlowExplorer<'g> {
         location_index: usize,
         overwritten: bool
     ) {
-        // We only consider direct registers here and not memory storage slots
+        // We only consider direct registers here (except RIP) and not memory storage slots
         // because eventhough they may have the same "location", i.e. the
         // same address formula based on registers the actual address may
         // differ depending on the register values.
-        if location.accesses_memory() {
+        if location.accesses_memory() || location == StorageLocation::Direct(Register::RIP) {
             return;
         }
 
@@ -305,10 +367,7 @@ mod tests {
         });
     }
 
-    #[test]
-    fn value_flow_graph() {
-        test("bufs");
-        // test("paths");
-        // test("deep");
-    }
+    #[test] fn value_bufs() { test("bufs") }
+    #[test] fn value_paths() { test("paths") }
+    #[test] fn value_deep() { test("deep") }
 }

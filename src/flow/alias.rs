@@ -133,7 +133,7 @@ impl<'g> AliasExplorer<'g> {
         state: &SymState,
     ) {
         let aliasing = if let Some(target_access) = target {
-            determine_aliasing_condition(&self.solver, target_access, &access)
+            determine_aliasing_condition(&self.solver, target_access, &access).0
         } else {
             SymCondition::FALSE
         };
@@ -202,12 +202,15 @@ impl<'g> AliasExplorer<'g> {
     }
 }
 
-/// Returns the condition under which `a` and `b` point to overlapping memory.
+/// Returns two condition under which `a` and `b` point to overlapping memory.
+/// - First: The condition under which they overlap on any byte.
+/// - Second: Whether they totally overlap in any case
+///           (i.e. they are a perfect match).
 pub fn determine_aliasing_condition(
     solver: &Solver,
     a: &TypedMemoryAccess,
     b: &TypedMemoryAccess
-) -> SymCondition {
+) -> (SymCondition, bool) {
     /// Return the condition under which `ptr` is in the area spanned by
     /// pointer of `area` and the following bytes based on the data type.
     fn contains_ptr(area: &TypedMemoryAccess, ptr: &SymExpr) -> SymCondition {
@@ -216,17 +219,23 @@ pub fn determine_aliasing_condition(
         ptr.clone().sub(left).less_than(area_len, false)
     }
 
+    let perfect_match = a.1 == b.1 && solver.check_always_equal(&a.0, &b.0);
+
     // The data accesses are overlapping if the area of the first one contains
     // the second one or the other way around, where the area is the memory
     // from the start of the pointer until the start + the byte width.
-    let condition = match (a.1, b.1) {
-        (N8, N8) => a.0.clone().equal(b.0.clone()),
-        (N8, _) => contains_ptr(b, &a.0),
-        (_, N8) => contains_ptr(a, &b.0),
-        (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
+    let condition = if perfect_match {
+        SymCondition::TRUE
+    } else {
+        solver.simplify_condition(&match (a.1, b.1) {
+            (N8, N8) => a.0.clone().equal(b.0.clone()),
+            (N8, _) => contains_ptr(b, &a.0),
+            (_, N8) => contains_ptr(a, &b.0),
+            (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
+        })
     };
 
-    solver.simplify_condition(&condition)
+    (condition, perfect_match)
 }
 
 impl Display for AliasMap {
@@ -277,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn bufs() {
+    fn alias_bufs() {
         let alias_map = test("bufs", AbstractLocation {
             addr: 0x39d,
             trace: vec![0x2ba],
@@ -306,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn paths() {
+    fn alias_paths() {
         test("paths", AbstractLocation {
             addr: 0x363,
             trace: vec![0x2ba],
@@ -320,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn deep() {
+    fn alias_deep() {
         test("deep", AbstractLocation {
             addr: 0x399,
             trace: vec![0x2ba],

@@ -69,6 +69,15 @@ impl Solver {
         solver.check()
     }
 
+    /// Check whether two expressions are possibly equal.
+    pub fn check_always_equal(&self, a: &SymExpr, b: &SymExpr) -> bool {
+        let z3_a = a.to_z3_ast(&self.ctx);
+        let z3_b = b.to_z3_ast(&self.ctx);
+        let solver = z3::Solver::new(&self.ctx);
+        solver.assert(&z3_a._eq(&z3_b).not());
+        !solver.check()
+    }
+
     /// Builds the default simplifaction params.
     fn params(&self) -> z3::Params {
         let mut params = z3::Params::new(&self.ctx);

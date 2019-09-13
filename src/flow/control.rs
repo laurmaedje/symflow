@@ -121,7 +121,7 @@ impl ControlFlowGraph {
             if condition != &SymCondition::TRUE {
                 write!(f, "label=\"{}\", ", condition)?;
             }
-            write!(f, "color=grey")
+            Ok(())
         })?;
 
         write_footer(&mut f)

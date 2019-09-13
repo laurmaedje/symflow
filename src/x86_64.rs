@@ -69,9 +69,20 @@ impl Instruction {
 
         let loc = StorageLocation::from_operand;
         let reg = StorageLocation::Direct;
+
         fn both<T>(a: Option<T>, b: Option<T>) -> Vec<(T, T)> {
             if let (Some(a), Some(b)) = (a, b) { vec![(a, b)] } else { vec![] }
         }
+
+        fn stack(data_type: DataType, push: bool) -> StorageLocation {
+            StorageLocation::Indirect {
+                data_type,
+                base: RSP,
+                scaled_offset: None,
+                displacement: if push { Some(-(data_type.bytes() as i64)) } else { None },
+            }
+        }
+
         macro_rules! get {
             ($op:expr) => { if let Some(s) = loc($op) { s } else { return vec![] } };
         }
@@ -79,7 +90,11 @@ impl Instruction {
         match self.mnemoic {
             Add | Sub | Imul => {
                 let target = get!(self.operands[0]);
-                self.operands.iter().skip(1)
+                let mut source_iter = self.operands.iter();
+                if self.operands.len() > 2 {
+                    source_iter.next().unwrap();
+                }
+                source_iter.take(2)
                     .filter_map(|&op| loc(op).map(|s| (s, target)))
                     .collect()
             },
@@ -103,21 +118,16 @@ impl Instruction {
 
             Push => {
                 let target = get!(self.operands[0]);
-                vec![(target, StorageLocation::Indirect {
-                    data_type: target.data_type(),
-                    base: RSP,
-                    scaled_offset: None,
-                    displacement: Some(-(target.data_type().bytes() as i64)),
-                })]
+                vec![(target, stack(target.data_type(), true))]
             },
             Pop => {
                 let target = get!(self.operands[0]);
-                vec![(StorageLocation::indirect_reg(target.data_type(), RSP), target)]
+                vec![(stack(target.data_type(), false), target)]
             },
-            Leave => vec![
-                (reg(EBP), reg(ESP)),
-                (StorageLocation::indirect_reg(N64, RSP), reg(RBP))
-            ],
+
+            Call => vec![(reg(RIP), stack(N64, true))],
+            Leave => vec![(reg(RBP), reg(RSP)), (StorageLocation::indirect_reg(N64, RBP), reg(RBP))],
+            Ret => vec![(stack(N64, false), reg(RIP))],
 
             _ => vec![],
         }
