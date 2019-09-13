@@ -263,14 +263,13 @@ impl SymState {
                 }
 
                 let kind = if read { StdioKind::Stdin } else { StdioKind::Stdout };
-                return Some(Event::Stdio(kind, locs));
+                Some(Event::Stdio(kind, locs))
             },
 
             // System exit
-            60 => return Some(Event::Exit),
+            60 => Some(Event::Exit),
             s => panic!("do_syscall: unimplemented syscall number {}", s),
         }
-        None
     }
 }
 

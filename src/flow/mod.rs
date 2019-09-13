@@ -25,6 +25,12 @@ pub struct AbstractLocation {
     pub storage: StorageLocation,
 }
 
+impl AbstractLocation {
+    pub fn new(addr: u64, trace: Vec<u64>, storage: StorageLocation) -> AbstractLocation {
+        AbstractLocation { addr, trace, storage }
+    }
+}
+
 /// A location in a real execution.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum StorageLocation {
