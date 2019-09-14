@@ -15,7 +15,7 @@ pub use value::*;
 
 
 /// A storage location within the context in which it is valid.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct AbstractLocation {
     /// The address at which the location is valid.
     pub addr: u64,
@@ -32,7 +32,7 @@ impl AbstractLocation {
 }
 
 /// A location in a real execution.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum StorageLocation {
     /// Directly the register.
     Direct(Register),

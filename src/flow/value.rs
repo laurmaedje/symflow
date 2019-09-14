@@ -74,18 +74,18 @@ impl ValueFlowGraph {
 
         write_edges(&mut f, &self.edges, |f, ((start, end), (condition, _))| {
             if condition != &SymCondition::TRUE {
-                write!(f, "label=\" ")?;
-                let fmt = condition.to_string();
+                write!(f, "label=<")?;
+                let fmt = condition.to_string().replace("<", "&lt;").replace(">", "&gt;");
                 let mut len = 0;
                 for part in fmt.split(" ") {
                     write!(f, "{} ", part)?;
                     len += part.len();
                     if len > 40 {
-                        writeln!(f)?;
+                        write!(f, "<br/>")?;
                         len = 0;
                     }
                 }
-                write!(f, "\", ")?;
+                write!(f, ">, ")?;
             }
 
             if let ValueFlowNode::Location(first) = &self.nodes[start] {

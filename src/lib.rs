@@ -48,12 +48,12 @@ mod helper {
     }
 }
 
-pub mod elf;
-pub mod x86_64;
-pub mod ir;
 pub mod flow;
-pub mod sym;
 pub mod math;
+pub mod sym;
+pub mod elf;
+pub mod ir;
+pub mod x86_64;
 
 
 /// A decoded binary file.

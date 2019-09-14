@@ -248,7 +248,7 @@ impl Display for AliasMap {
         write!(f, "AliasMap [")?;
         if !self.map.is_empty() { writeln!(f)?; }
         let mut map: Vec<_> = self.map.iter().collect();
-        map.sort_by_key(|pair| pair.0.addr);
+        map.sort_by_key(|pair| pair.0);
         for (location, (condition, symbols)) in map {
             writeln!(f, "    {}: {}", location, condition)?;
             if !symbols.is_empty() {
