@@ -472,7 +472,7 @@ mod tests {
         let program = Program::new(path);
         let graph = ControlFlowGraph::new(&program);
 
-        compile("target/control-flow", filename, |file| {
+        compile("control", filename, |file| {
             graph.visualize(file, &program, filename, VisualizationStyle::Instructions)
         });
     }

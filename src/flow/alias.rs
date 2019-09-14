@@ -157,7 +157,7 @@ impl<'g> AliasExplorer<'g> {
             SymCondition::FALSE
         };
 
-        let symbols = exp.state.symbol_map_for(&condition);
+        let symbols = exp.state.get_symbol_map_for(&condition);
         self.map.insert(location, (condition, symbols));
     }
 
@@ -281,8 +281,9 @@ mod tests {
         let graph = ControlFlowGraph::new(&program);
         let map = AliasMap::new(&graph, &location);
 
-        fs::create_dir("target/value-flow").ok();
-        let alias_path = format!("target/value-flow/alias-{}.txt", filename);
+        fs::create_dir("target/out").ok();
+        fs::create_dir("target/out/alias").ok();
+        let alias_path = format!("target/out/alias/{}.txt", filename);
         let mut alias_file = File::create(alias_path).unwrap();
         write!(alias_file, "{}", map).unwrap();
 

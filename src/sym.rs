@@ -122,7 +122,7 @@ impl SymState {
     }
 
     /// Generate a symbol map with just the symbols needed for the condition.
-    pub fn symbol_map_for(&self, condition: &SymCondition) -> SymbolMap {
+    pub fn get_symbol_map_for(&self, condition: &SymCondition) -> SymbolMap {
         let mut symbols = HashMap::new();
         condition.traverse(&mut |node| {
             if let Traversed::Expr(&SymExpr::Sym(symbol)) = node {

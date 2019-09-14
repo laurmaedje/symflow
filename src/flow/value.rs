@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use crate::x86_64::Register;
 use crate::math::{SymCondition, Symbol, SharedSolver, Solver, DataType};
-use crate::sym::{SymState, Event, MemoryStrategy, TypedMemoryAccess, StdioKind};
+use crate::sym::{SymState, Event, MemoryStrategy, TypedMemoryAccess, SymbolMap, StdioKind};
 use super::{ControlFlowGraph, AbstractLocation, StorageLocation};
 use super::alias::determine_aliasing_condition;
 use DataType::*;
@@ -19,7 +19,7 @@ pub struct ValueFlowGraph {
     pub nodes: Vec<AbstractLocation>,
     /// The conditions for value flow between the abstract locations.
     /// The key pairs are indices into the `nodes` vector.
-    pub edges: HashMap<(usize, usize), SymCondition>,
+    pub edges: HashMap<(usize, usize), (SymCondition, SymbolMap)>,
     /// For reads or writes through standard interfaces we keep the node they go to,
     /// the kind of I/O and the name of the symbol we read from or wrote to.
     pub io: Vec<(usize, StdioKind, Symbol)>,
@@ -64,7 +64,7 @@ impl ValueFlowGraph {
                     splitter.next().unwrap(), splitter.next().unwrap())?;
         }
 
-        write_edges(&mut f, &self.edges, |f, ((start, end), condition)| {
+        write_edges(&mut f, &self.edges, |f, ((start, end), (condition, _))| {
             if condition != &SymCondition::TRUE {
                 write!(f, "label=\"{}\", ", condition)?;
             }
@@ -83,7 +83,7 @@ struct ValueFlowExplorer<'g> {
     graph: &'g ControlFlowGraph,
     solver: SharedSolver,
     nodes: HashMap<AbstractLocation, usize>,
-    edges: HashMap<(usize, usize), SymCondition>,
+    edges: HashMap<(usize, usize), (SymCondition, SymbolMap)>,
     io: HashMap<AbstractLocation, (StdioKind, Symbol)>,
 }
 
@@ -167,7 +167,8 @@ impl<'g> ValueFlowExplorer<'g> {
 
                     // For flows inherent to an instruction the condition is
                     // obviously always true.
-                    self.edges.insert((source_index, sink_index), SymCondition::TRUE);
+                    self.edges.insert((source_index, sink_index),
+                                      (SymCondition::TRUE, SymbolMap::new()));
 
                     // Writing memory accesses are stored in the `write_accesses` list
                     // so we can check aliasing with reading accesses later on.
@@ -288,14 +289,15 @@ impl<'g> ValueFlowExplorer<'g> {
             // There may already be another condition for this edge because we reached
             // it through a different path. If so, both are valid and we have
             // to take the disjunction of them.
-            if let Some(prev) = self.edges.remove(&edge) {
+            if let Some((prev, _)) = self.edges.remove(&edge) {
                 condition = prev.or(condition);
             }
 
             condition = self.solver.simplify_condition(&condition);
+            let symbols = exp.state.get_symbol_map_for(&condition);
 
             if condition != SymCondition::FALSE {
-                self.edges.insert(edge, condition);
+                self.edges.insert(edge, (condition, symbols));
             }
 
             // If the pointers alias in *any* case and both accesses are the same
@@ -333,7 +335,8 @@ impl<'g> ValueFlowExplorer<'g> {
         // storage location if it was used before.
         if !overwritten {
             if let Some(prev) = exp.location_links.get(&location) {
-                self.edges.insert((*prev, location_index), SymCondition::TRUE);
+                self.edges.insert((*prev, location_index),
+                                  (SymCondition::TRUE, SymbolMap::new()));
             }
         }
 
@@ -363,7 +366,7 @@ mod tests {
         let control_graph = ControlFlowGraph::new(&program);
         let value_graph = ValueFlowGraph::new(&control_graph);
 
-        compile("target/value-flow", filename, |file| {
+        compile("value", filename, |file| {
             value_graph.visualize(file, filename)
         });
     }

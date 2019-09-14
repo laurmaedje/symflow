@@ -17,18 +17,18 @@ pub fn write_header<W: Write>(mut f: W, title: &str) -> Result<()> {
 }
 
 /// Write condition edges.
-pub fn write_edges<W: Write, F>(
+pub fn write_edges<W: Write, F, T>(
     mut f: W,
-    edges: &HashMap<(usize, usize), SymCondition>,
+    edges: &HashMap<(usize, usize), T>,
     writer: F
-) -> Result<()> where F: Fn(&mut W, ((usize, usize), &SymCondition)) -> Result<()> {
+) -> Result<()> where F: Fn(&mut W, ((usize, usize), &T)) -> Result<()> {
     // Export the edges, but sort them first to make the graphviz output
     // deterministic eventhough the hash map cannot be traversed in order.
     let mut edges = edges.iter().collect::<Vec<_>>();
     edges.sort_by_key(|edge| edge.0);
-    for (&(start, end), condition) in edges {
+    for (&(start, end), edge) in edges {
         write!(f, "b{} -> b{} [", start, end)?;
-        writer(&mut f, ((start, end), &condition))?;
+        writer(&mut f, ((start, end), edge))?;
         writeln!(f, "]")?;
     }
     Ok(())
@@ -47,22 +47,22 @@ pub mod test {
     use super::*;
 
     /// Compile the file with graphviz.
-    pub fn compile<F>(dir: &str, filename: &str, writer: F)
-    where F: FnOnce(File) -> Result<()> {
-        // Visualize the graph into a PDF file.
-        fs::create_dir(dir).ok();
-        let flow_temp = "target/temp-flow.gv";
-        let flow_file = File::create(flow_temp).unwrap();
-        writer(flow_file).unwrap();
+    pub fn compile<F>(dir: &str, filename: &str, writer: F) where F: FnOnce(File) -> Result<()> {
+        fs::create_dir("target/out").ok();
+        let dir = format!("target/out/{}", dir);
+
+        fs::create_dir(&dir).ok();
+        let temp_path = "target/graph.gv";
+        let temp_file = File::create(temp_path).unwrap();
+        writer(temp_file).unwrap();
         let output = Command::new("dot")
             .arg("-Tpdf")
-            .arg(flow_temp)
+            .arg(temp_path)
             .arg("-o")
             .arg(format!("{}/{}.pdf", dir, filename))
             .output()
             .expect("failed to run graphviz");
         std::io::stdout().write_all(&output.stdout).unwrap();
         std::io::stderr().write_all(&output.stderr).unwrap();
-        // fs::remove_file(flow_temp).unwrap();
     }
 }
