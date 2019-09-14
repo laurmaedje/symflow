@@ -7,9 +7,9 @@ pub const BR: &str = "<br align=\"left\"/>";
 
 
 /// Write the preamble of the graphviz file.
-pub fn write_header<W: Write>(mut f: W, title: &str) -> Result<()> {
+pub fn write_header<W: Write>(mut f: W, title: &str, fontsize: u32) -> Result<()> {
     writeln!(f, "digraph Flow {{")?;
-    write!(f, "graph [label=\"{}\", labelloc=\"t\", fontsize=25, ", title)?;
+    write!(f, "graph [label=\"{}\", labelloc=\"t\", fontsize={}, ", title, fontsize)?;
     writeln!(f, "fontname=\"Source Code Pro\"]")?;
     writeln!(f, "node [fontname=\"Source Code Pro\"]")?;
     writeln!(f, "edge [fontname=\"Source Code Pro\"]")

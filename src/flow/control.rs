@@ -76,7 +76,7 @@ impl ControlFlowGraph {
         use super::visualize::*;
         let mut f = target;
 
-        write_header(&mut f, &format!("Control flow graph for {}", title))?;
+        write_header(&mut f, &format!("Control flow graph for {}", title), 20)?;
 
         // Export the blocks.
         for (index, node) in self.nodes.iter().enumerate() {

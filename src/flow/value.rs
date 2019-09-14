@@ -44,7 +44,7 @@ impl ValueFlowGraph {
         use super::visualize::*;
         let mut f = target;
 
-        write_header(&mut f, &format!("Value flow graph for {}", title))?;
+        write_header(&mut f, &format!("Value flow graph for {}", title), 40)?;
 
         for (index, node) in self.nodes.iter().enumerate() {
             match node {
