@@ -1,8 +1,8 @@
 //! Control and value flow models.
 
 use std::fmt::{self, Display, Formatter};
+use crate::math::{Integer, DataType};
 use crate::x86_64::{Register, Operand};
-use crate::math::DataType;
 
 mod control;
 mod alias;
@@ -15,7 +15,7 @@ pub use value::*;
 
 
 /// A storage location within the context in which it is valid.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct AbstractLocation {
     /// The address at which the location is valid.
     pub addr: u64,
@@ -32,7 +32,7 @@ impl AbstractLocation {
 }
 
 /// A location in a real execution.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum StorageLocation {
     /// Directly the register.
     Direct(Register),
@@ -97,6 +97,13 @@ impl StorageLocation {
     }
 }
 
+/// Where a value comes from.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum ValueSource {
+    Storage(StorageLocation),
+    Const(Integer),
+}
+
 impl Display for AbstractLocation {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "{} at {:x}", self.storage, self.addr)?;
@@ -129,6 +136,15 @@ impl Display for StorageLocation {
                 }
                 write!(f, ":{}]", data_type)
             },
+        }
+    }
+}
+
+impl Display for ValueSource {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            ValueSource::Storage(storage) => write!(f, "{}", storage),
+            ValueSource::Const(int) => write!(f, "{}", int),
         }
     }
 }

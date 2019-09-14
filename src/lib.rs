@@ -1,14 +1,14 @@
 //! Value flow analysis for x86-64 ELF binaries based on symbolic execution 🚀
 
-#![allow(unused)]
+// #![allow(unused)]
 
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 use std::path::Path;
 
 use crate::elf::ElfFile;
-use crate::x86_64::Instruction;
 use crate::ir::{Microcode, MicroEncoder};
+use crate::x86_64::Instruction;
 
 /// Helper functions and macros that are used across the crate.
 #[macro_use]
@@ -27,7 +27,7 @@ mod helper {
     }
 
     pub fn signed_name(s: bool) -> &'static str {
-        if s { "signed" } else { "unsigned" }
+        if s { " signed" } else { "" }
     }
 
     pub fn boxed<T>(value: T) -> Box<T> { Box::new(value) }
@@ -157,5 +157,6 @@ mod tests {
         test("bufs");
         test("paths");
         test("deep");
+        test("overwrite");
     }
 }

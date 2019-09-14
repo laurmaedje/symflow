@@ -3,8 +3,8 @@
 use std::fmt::{self, Display, Formatter};
 use byteorder::{ByteOrder, LittleEndian};
 
+use crate::flow::{ValueSource, StorageLocation};
 use crate::math::{Integer, DataType};
-use crate::flow::StorageLocation;
 use DataType::*;
 
 
@@ -63,15 +63,20 @@ impl Instruction {
     }
 
     /// Pairs of (source, sink) describing value flow in the instruction.
-    pub fn flows(&self) -> Vec<(StorageLocation, StorageLocation)> {
+    pub fn flows(&self) -> Vec<(ValueSource, StorageLocation)> {
         use Mnemoic::*;
         use Register::*;
 
         let loc = StorageLocation::from_operand;
         let reg = StorageLocation::Direct;
+        let stg = ValueSource::Storage;
+        let src = |op| match op {
+            Operand::Immediate(int) => Some(ValueSource::Const(int)),
+            op => loc(op).map(|s| ValueSource::Storage(s)),
+        };
 
-        fn both<T>(a: Option<T>, b: Option<T>) -> Vec<(T, T)> {
-            if let (Some(a), Some(b)) = (a, b) { vec![(a, b)] } else { vec![] }
+        macro_rules! get {
+            ($op:expr) => { if let Some(s) = loc($op) { s } else { return vec![] } };
         }
 
         fn stack(data_type: DataType, push: bool) -> StorageLocation {
@@ -83,10 +88,6 @@ impl Instruction {
             }
         }
 
-        macro_rules! get {
-            ($op:expr) => { if let Some(s) = loc($op) { s } else { return vec![] } };
-        }
-
         match self.mnemoic {
             Add | Sub | Imul => {
                 let target = get!(self.operands[0]);
@@ -95,39 +96,46 @@ impl Instruction {
                     source_iter.next().unwrap();
                 }
                 source_iter.take(2)
-                    .filter_map(|&op| loc(op).map(|s| (s, target)))
+                    .filter_map(|&op| src(op).map(|s| (s, target)))
                     .collect()
             },
 
-            Mov | Movzx | Movsx => both(loc(self.operands[1]), loc(self.operands[0])),
+            Mov | Movzx | Movsx => match (src(self.operands[1]), loc(self.operands[0])) {
+                (Some(a), Some(b)) => vec![(a, b)],
+                _ => vec![],
+            },
+
             Lea => {
                 let target = get!(self.operands[0]);
                 let source = get!(self.operands[1]);
                 let mut pairs = vec![];
                 if let StorageLocation::Indirect { base, scaled_offset, .. } = source {
-                    pairs.push((reg(base), target));
+                    pairs.push((stg(reg(base)), target));
                     if let Some((offset, _)) = scaled_offset {
-                        pairs.push((reg(offset), target));
+                        pairs.push((stg(reg(offset)), target));
                     }
                 }
                 pairs
             },
 
-            Cwde => vec![(reg(AX), reg(EAX))],
-            Cdqe => vec![(reg(EAX), reg(RAX))],
+            Cwde => vec![(stg(reg(AX)), reg(EAX))],
+            Cdqe => vec![(stg(reg(EAX)), reg(RAX))],
 
             Push => {
                 let target = get!(self.operands[0]);
-                vec![(target, stack(target.data_type(), true))]
+                vec![(stg(target), stack(target.data_type(), true))]
             },
             Pop => {
                 let target = get!(self.operands[0]);
-                vec![(stack(target.data_type(), false), target)]
+                vec![(stg(stack(target.data_type(), false)), target)]
             },
 
-            Call => vec![(reg(RIP), stack(N64, true))],
-            Leave => vec![(reg(RBP), reg(RSP)), (StorageLocation::indirect_reg(N64, RBP), reg(RBP))],
-            Ret => vec![(stack(N64, false), reg(RIP))],
+            Call => vec![(stg(reg(RIP)), stack(N64, true))],
+            Leave => vec![
+                (stg(reg(RBP)), reg(RSP)),
+                (stg(StorageLocation::indirect_reg(N64, RBP)), reg(RBP))
+            ],
+            Ret => vec![(stg(stack(N64, false)), reg(RIP))],
 
             _ => vec![],
         }
@@ -412,7 +420,7 @@ impl<'a> Decoder<'a> {
     fn decode_unsigned_value(&mut self, width: DataType) -> u64 {
         let bytes = &self.bytes[self.index ..];
         let (value, off) = match width {
-            N8 => (bytes[0] as i8 as u64, 1),
+            N8 => (bytes[0] as u64, 1),
             N16 => (LittleEndian::read_u16(bytes) as u64, 2),
             N32 => (LittleEndian::read_u32(bytes) as u64, 4),
             N64 => (LittleEndian::read_u64(bytes), 8),
@@ -615,6 +623,7 @@ mod tests {
         test(&[0x80, 0x7d, 0xff, 0x60], "cmp byte ptr [rbp-0x1], 0x60");
         test(&[0x39, 0x45, 0xfc], "cmp dword ptr [rbp-0x4], eax");
         test(&[0x3c, 0x40], "cmp al, 0x40");
+        test(&[0x80, 0x7d, 0xfe, 0x80], "cmp byte ptr [rbp-0x2], 0x80");
 
         // Moves
         test(&[0x88, 0x45, 0xec], "mov byte ptr [rbp-0x14], al");

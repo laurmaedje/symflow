@@ -4,10 +4,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 
-use crate::x86_64::{Instruction, Mnemoic, Register};
-use crate::ir::{MicroOperation, Location, Temporary, MemoryMapped};
-use crate::math::{Integer, DataType, SymExpr, SymCondition, Symbol, SharedSolver, Traversed};
 use crate::flow::{AbstractLocation, StorageLocation};
+use crate::ir::{MicroOperation, Location, Temporary, MemoryMapped};
+use crate::math::{SymExpr, SymCondition, Integer, DataType, Symbol, SharedSolver, Traversed};
+use crate::x86_64::{Instruction, Mnemoic, Register};
 use DataType::*;
 
 
@@ -136,7 +136,7 @@ impl SymState {
 
     /// Return the address expression and data type of the storage location if
     /// it is a memory access.
-    pub fn get_access_for_location(&self, location: StorageLocation) -> Option<TypedMemoryAccess> {
+    pub fn get_access_for_storage(&self, location: StorageLocation) -> Option<TypedMemoryAccess> {
         use StorageLocation::*;
         match location {
             Direct(_) => None,
@@ -507,7 +507,7 @@ impl Display for TypedMemoryAccess {
 }
 
 /// Kinds of standard interfaces (stdin or stdout).
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum StdioKind {
     Stdin,
     Stdout,

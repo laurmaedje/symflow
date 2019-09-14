@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::io::{Result, Write};
-use crate::math::SymCondition;
 
 pub const BR: &str = "<br align=\"left\"/>";
 
@@ -10,7 +9,7 @@ pub const BR: &str = "<br align=\"left\"/>";
 /// Write the preamble of the graphviz file.
 pub fn write_header<W: Write>(mut f: W, title: &str) -> Result<()> {
     writeln!(f, "digraph Flow {{")?;
-    write!(f, "graph [label=<{}<br/><br/>>, labelloc=\"t\", fontsize=25, ", title)?;
+    write!(f, "graph [label=\"{}\", labelloc=\"t\", fontsize=25, ", title)?;
     writeln!(f, "fontname=\"Source Code Pro\"]")?;
     writeln!(f, "node [fontname=\"Source Code Pro\"]")?;
     writeln!(f, "edge [fontname=\"Source Code Pro\"]")
@@ -52,16 +51,19 @@ pub mod test {
         let dir = format!("target/out/{}", dir);
 
         fs::create_dir(&dir).ok();
-        let temp_path = "target/graph.gv";
+        let temp_path = "target/graph.dot";
         let temp_file = File::create(temp_path).unwrap();
         writer(temp_file).unwrap();
-        let output = Command::new("dot")
-            .arg("-Tpdf")
-            .arg(temp_path)
-            .arg("-o")
-            .arg(format!("{}/{}.pdf", dir, filename))
+
+        let cmd = format!("ccomps -x {} | dot | gvpack -n | neato -Tpdf -n2 -o {}/{}.pdf",
+                           temp_path, dir, filename);
+
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(cmd)
             .output()
             .expect("failed to run graphviz");
+
         std::io::stdout().write_all(&output.stdout).unwrap();
         std::io::stderr().write_all(&output.stderr).unwrap();
     }

@@ -5,24 +5,28 @@ use std::io::{self, Write};
 use std::rc::Rc;
 
 use crate::x86_64::Register;
-use crate::math::{SymCondition, Symbol, SharedSolver, Solver, DataType};
+use crate::math::{SymCondition, Integer, Symbol, SharedSolver, Solver};
 use crate::sym::{SymState, Event, MemoryStrategy, TypedMemoryAccess, SymbolMap, StdioKind};
-use super::{ControlFlowGraph, AbstractLocation, StorageLocation};
-use super::alias::determine_aliasing_condition;
-use DataType::*;
+use super::{ControlFlowGraph, ValueSource, AbstractLocation, StorageLocation};
+use super::{determine_any_byte_condition, determine_all_bytes_condition};
 
 
 /// Contains the conditions under which values flow between abstract locations.
 #[derive(Debug, Clone)]
 pub struct ValueFlowGraph {
     /// The nodes in the graph, i.e. all abstract locations in the executable.
-    pub nodes: Vec<AbstractLocation>,
+    pub nodes: Vec<ValueFlowNode>,
     /// The conditions for value flow between the abstract locations.
     /// The key pairs are indices into the `nodes` vector.
     pub edges: HashMap<(usize, usize), (SymCondition, SymbolMap)>,
-    /// For reads or writes through standard interfaces we keep the node they go to,
-    /// the kind of I/O and the name of the symbol we read from or wrote to.
-    pub io: Vec<(usize, StdioKind, Symbol)>,
+}
+
+/// A node in the value flow graph, describing some kind of value.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum ValueFlowNode {
+    Location(AbstractLocation),
+    Io(StdioKind, Symbol),
+    Constant(usize, Integer),
 }
 
 impl ValueFlowGraph {
@@ -42,35 +46,57 @@ impl ValueFlowGraph {
 
         write_header(&mut f, &format!("Value flow graph for {}", title))?;
 
-        for (index, (loc, kind, symbol)) in self.io.iter().enumerate() {
-            let color = match kind {
-                StdioKind::Stdin => "#4caf50",
-                StdioKind::Stdout => "#03a9f4",
-            };
-
-            writeln!(f, "k{} [label=<<b>{}</b>>, shape=box, style=filled, fillcolor=\"{}\"]",
-                index, symbol, color)?;
-
-            match kind {
-                StdioKind::Stdin => writeln!(f, "k{} -> b{}", index, loc)?,
-                StdioKind::Stdout => writeln!(f, "b{} -> k{}", loc, index)?,
-            }
-        }
-
         for (index, node) in self.nodes.iter().enumerate() {
-            let fmt = node.to_string().replace(">", "&gt;");
-            let mut splitter = fmt.splitn(2, ' ');
-            writeln!(f, "b{} [label=<<b>{}</b> {}>, shape=box]", index,
-                    splitter.next().unwrap(), splitter.next().unwrap())?;
+            match node {
+                ValueFlowNode::Location(location) => {
+                    let fmt = location.to_string().replace(">", "&gt;");
+                    let mut splitter = fmt.splitn(2, ' ');
+                    writeln!(f, "b{} [label=<<b>{}</b> {}>,shape=box]", index,
+                                splitter.next().unwrap(), splitter.next().unwrap())?;
+                },
+
+                ValueFlowNode::Io(kind, symbol) => {
+                    let color = match kind {
+                        StdioKind::Stdin => "#4caf50",
+                        StdioKind::Stdout => "#03a9f4",
+                    };
+
+                    writeln!(f, "b{} [label=<<b>{}</b>>,shape=box,style=filled,fillcolor=\"{}\"]",
+                                index, symbol, color)?;
+                },
+
+                ValueFlowNode::Constant(_, int) => {
+                    writeln!(f, "b{} [label=<{}>,shape=box,style=filled,fillcolor=\"#f0ce24\"]",
+                         index, int)?;
+                },
+            }
         }
 
         write_edges(&mut f, &self.edges, |f, ((start, end), (condition, _))| {
             if condition != &SymCondition::TRUE {
-                write!(f, "label=\"{}\", ", condition)?;
+                write!(f, "label=\" ")?;
+                let fmt = condition.to_string();
+                let mut len = 0;
+                for part in fmt.split(" ") {
+                    write!(f, "{} ", part)?;
+                    len += part.len();
+                    if len > 40 {
+                        writeln!(f)?;
+                        len = 0;
+                    }
+                }
+                write!(f, "\", ")?;
             }
-            if self.nodes[start].storage.normalized() == self.nodes[end].storage.normalized() {
-                write!(f, "style=dashed, color=\"#ababab\"")?;
+
+            if let ValueFlowNode::Location(first) = &self.nodes[start] {
+                if let ValueFlowNode::Location(second) = &self.nodes[end] {
+                    if !first.storage.accesses_memory() &&
+                        first.storage.normalized() == second.storage.normalized() {
+                        write!(f, "style=dashed, color=\"#ababab\"")?;
+                    }
+                }
             }
+
             Ok(())
         })?;
 
@@ -82,9 +108,8 @@ impl ValueFlowGraph {
 struct ValueFlowExplorer<'g> {
     graph: &'g ControlFlowGraph,
     solver: SharedSolver,
-    nodes: HashMap<AbstractLocation, usize>,
+    nodes: HashMap<ValueFlowNode, usize>,
     edges: HashMap<(usize, usize), (SymCondition, SymbolMap)>,
-    io: HashMap<AbstractLocation, (StdioKind, Symbol)>,
 }
 
 #[derive(Clone)]
@@ -114,7 +139,6 @@ impl<'g> ValueFlowExplorer<'g> {
             solver: Rc::new(Solver::new()),
             nodes: HashMap::new(),
             edges: HashMap::new(),
-            io: HashMap::new(),
         }
     }
 
@@ -147,39 +171,56 @@ impl<'g> ValueFlowExplorer<'g> {
                 let next_addr = addr + len;
 
                 for (source, sink) in instruction.flows() {
-                    let sink_node = AbstractLocation::new(addr, exp.state.trace.clone(), sink);
-                    let sink_index = self.insert_node(sink_node);
+                    let sink_index = self.insert_loc(addr, &exp.state.trace, sink);
 
-                    // If source and sink are basically the same, there is only a
-                    // stay-flow to be linked.
-                    if source.normalized() == sink.normalized() {
-                        self.link_location(&mut exp, sink, sink_index, false);
-                        continue;
-                    }
+                    // The source may be a constant or a storage location.
+                    let source_data = match source {
+                        ValueSource::Storage(source) => {
+                            // If source and sink are the same, we have to add a backlink
+                            // because the actual source is the previous storage location,
+                            // but we do not add an edge between source and sink (that would
+                            // be a reflexive edge).
+                            if source.normalized() == sink.normalized() {
+                                self.link_location(&mut exp, sink, sink_index, false);
 
-                    let source_node = AbstractLocation::new(addr, exp.state.trace.clone(), source);
-                    let source_index = self.insert_node(source_node);
+                                Some((sink, sink_index))
 
-                    // Connect the abstract locations to their previous abstract
+                            } else {
+                                let source_index = self.insert_loc(addr, &exp.state.trace, source);
+                                self.link_location(&mut exp, source, source_index, false);
+
+                                // For flows inherent to an instruction the condition is
+                                // obviously always true.
+                                self.insert_true_edge(source_index, sink_index);
+
+                                Some((source, source_index))
+                            }
+                        },
+
+                        ValueSource::Const(int) => {
+                            let index = self.insert_node(ValueFlowNode::Constant(sink_index, int));
+                            self.insert_pre_edge(&exp, index, sink_index);
+
+                            None
+                        }
+                    };
+
+                    // Connect the abstract location to their previous abstract
                     // location with the same storage location.
-                    self.link_location(&mut exp, source, source_index, false);
                     self.link_location(&mut exp, sink, sink_index, true);
 
-                    // For flows inherent to an instruction the condition is
-                    // obviously always true.
-                    self.edges.insert((source_index, sink_index),
-                                      (SymCondition::TRUE, SymbolMap::new()));
+                    if let Some((source, source_index)) = source_data {
+                        // For reading memory accesses we need to check if they alias
+                        // with any of the previous writing accesses.
+                        if let Some(access) = exp.state.get_access_for_storage(source) {
+                            self.handle_read_access(&exp, access, source_index);
+                        }
+                    }
 
                     // Writing memory accesses are stored in the `write_accesses` list
                     // so we can check aliasing with reading accesses later on.
-                    if let Some(access) = exp.state.get_access_for_location(sink) {
+                    if let Some(access) = exp.state.get_access_for_storage(sink) {
                         exp.write_accesses.push((sink_index, access, exp.preconditions.len()));
-                    }
-
-                    // For reading memory accesses we need to check if they alias
-                    // with any of the previous writing accesses.
-                    if let Some(access) = exp.state.get_access_for_location(source) {
-                        self.handle_read_access(&exp, access, source_index);
                     }
                 }
 
@@ -222,14 +263,8 @@ impl<'g> ValueFlowExplorer<'g> {
 
     /// Arrange all data in the way expected for the flow graph.
     fn finish(self) -> ValueFlowGraph {
-        // Arrange the I/O into a vector.
-        let mut io: Vec<_> = self.io.iter()
-            .map(|(loc, &(kind, symbol))| (self.nodes[loc], kind, symbol))
-            .collect();
-        io.sort_by_key(|x| x.0);
-
         // Arrange the nodes into a vector.
-        let default = AbstractLocation::new(0, vec![], StorageLocation::Direct(Register::RAX));
+        let default = ValueFlowNode::Constant(0, Integer::from_ptr(0));
         let mut nodes = vec![default; self.nodes.len()];
         for (node, index) in self.nodes.into_iter() {
             nodes[index] = node;
@@ -238,7 +273,6 @@ impl<'g> ValueFlowExplorer<'g> {
         ValueFlowGraph {
             nodes,
             edges: self.edges,
-            io,
         }
     }
 
@@ -252,17 +286,22 @@ impl<'g> ValueFlowExplorer<'g> {
         for (symbol, access) in ios {
             // Add to the previous links list.
             let location = exp.state.symbol_map[&symbol].clone();
-            let index = self.insert_node(location.clone());
-            exp.location_links.insert(location.storage.normalized(), index);
+            let node_index = self.insert_node(ValueFlowNode::Location(location.clone()));
+            exp.location_links.insert(location.storage.normalized(), node_index);
+            let index = self.insert_node(ValueFlowNode::Io(kind, symbol));
 
             // If it is a stdin read, that is, a memory write, add it
             // to the write access list.
             match kind {
-                StdioKind::Stdin => exp.write_accesses.push((index, access, exp.preconditions.len())),
-                StdioKind::Stdout => self.handle_read_access(exp, access, index),
+                StdioKind::Stdin => {
+                    exp.write_accesses.push((node_index, access, exp.preconditions.len()));
+                    self.insert_pre_edge(&exp, index, node_index);
+                },
+                StdioKind::Stdout => {
+                    self.handle_read_access(exp, access, node_index);
+                    self.insert_pre_edge(&exp, node_index, index);
+                },
             }
-
-            self.io.insert(location, (kind, symbol));
         }
     }
 
@@ -274,36 +313,37 @@ impl<'g> ValueFlowExplorer<'g> {
         access: TypedMemoryAccess,
         location_index: usize
     ) {
-        for (prev_index, prev, num_preconditions) in exp.write_accesses.iter().rev() {
-            let edge = (*prev_index, location_index);
+        let mut overwritten = SymCondition::FALSE;
 
-            let (mut condition, perfect_match) =
-                determine_aliasing_condition(&self.solver, prev, &access);
+        for (prev_index, prev, num_preconditions) in exp.write_accesses.iter().rev() {
+            // Determine the conditions that all bytes of our read were written by
+            // this write and that any byte was written.
+            let mut all_condition = determine_all_bytes_condition(&self.solver, prev, &access);
+            let mut any_condition = match all_condition {
+                SymCondition::TRUE => SymCondition::TRUE,
+                _ => determine_any_byte_condition(&self.solver, prev, &access),
+            };
 
             // Any condition that has to be met on this path *additionally* to those
-            // already active for the current write have to be included in the condition.
+            // already active for the current write have to be included in the conditions.
             for pre in &exp.preconditions[*num_preconditions..] {
-                condition = condition.and(pre.clone());
+                all_condition = all_condition.and(pre.clone());
+                any_condition = any_condition.and(pre.clone());
             }
 
-            // There may already be another condition for this edge because we reached
-            // it through a different path. If so, both are valid and we have
-            // to take the disjunction of them.
-            if let Some((prev, _)) = self.edges.remove(&edge) {
-                condition = prev.or(condition);
-            }
+            // We have to make sure a later write has not overwritten this one.
+            any_condition = any_condition.and(overwritten.clone().not());
+            any_condition = self.solver.simplify_condition(&any_condition);
 
-            condition = self.solver.simplify_condition(&condition);
-            let symbols = exp.state.get_symbol_map_for(&condition);
-
-            if condition != SymCondition::FALSE {
-                self.edges.insert(edge, (condition, symbols));
+            if any_condition != SymCondition::FALSE {
+                self.insert_edge(exp, *prev_index, location_index, any_condition);
             }
 
             // If the pointers alias in *any* case and both accesses are the same
             // width this write would have definitely overwritten any previous one
             // and we can quit this loop safely.
-            if perfect_match {
+            overwritten = self.solver.simplify_condition(&overwritten.or(all_condition));
+            if overwritten == SymCondition::TRUE {
                 break;
             }
         }
@@ -335,20 +375,61 @@ impl<'g> ValueFlowExplorer<'g> {
         // storage location if it was used before.
         if !overwritten {
             if let Some(prev) = exp.location_links.get(&location) {
-                self.edges.insert((*prev, location_index),
-                                  (SymCondition::TRUE, SymbolMap::new()));
+                self.insert_true_edge(*prev, location_index);
             }
         }
 
         exp.location_links.insert(location, location_index);
     }
 
+    /// Insert a new abstract location node for a storage location in a context.
+    fn insert_loc(&mut self, addr: u64, trace: &[u64], storage: StorageLocation) -> usize {
+        let location = AbstractLocation::new(addr, trace.to_vec(), storage);
+        let node = ValueFlowNode::Location(location);
+        self.insert_node(node)
+    }
+
     /// Add a node to the list. This
     /// - inserts it and returns the new index if it didn't exist before
     /// - finds the existing node and returns it's index
-    fn insert_node(&mut self, node: AbstractLocation) -> usize {
+    fn insert_node(&mut self, node: ValueFlowNode) -> usize {
         let new_index = self.nodes.len();
         *self.nodes.entry(node).or_insert(new_index)
+    }
+
+    /// Insert an edge with condition TRUE.
+    fn insert_true_edge(&mut self, from: usize, to: usize) {
+        self.edges.insert((from, to), (SymCondition::TRUE, SymbolMap::new()));
+    }
+
+    /// Insert an edge with the precondition of the exploration target.
+    fn insert_pre_edge(&mut self, exp: &ExplorationTarget, from: usize, to: usize) {
+        let mut condition = SymCondition::TRUE;
+        for pre in &exp.preconditions {
+            condition = condition.and(pre.clone());
+        }
+        self.insert_edge(exp, from, to, condition);
+    }
+
+    /// Insert an edge, combining it with an edge that may already be there.
+    fn insert_edge(
+        &mut self,
+        exp: &ExplorationTarget,
+        from: usize,
+        to: usize,
+        mut condition: SymCondition
+    ) {
+        let edge = (from, to);
+
+        // There may already be another condition for this edge because we reached
+        // it through a different path. If so, both are valid and we have
+        // to take the disjunction of them.
+        if let Some((prev, _)) = self.edges.remove(&edge) {
+            condition = self.solver.simplify_condition(&prev.or(condition));
+        }
+
+        let symbols = exp.state.get_symbol_map_for(&condition);
+        self.edges.insert(edge, (condition, symbols));
     }
 }
 
@@ -374,4 +455,5 @@ mod tests {
     #[test] fn value_bufs() { test("bufs") }
     #[test] fn value_paths() { test("paths") }
     #[test] fn value_deep() { test("deep") }
+    #[test] fn value_overwrite() { test("overwrite") }
 }

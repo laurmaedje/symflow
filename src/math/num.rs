@@ -1,6 +1,5 @@
 //! Integers with machine semantics.
 
-use std::cmp::{PartialOrd, Eq, PartialEq};
 use std::fmt::{self, Display, Formatter};
 use std::ops::{BitAnd, BitOr};
 use byteorder::{ByteOrder, LittleEndian};

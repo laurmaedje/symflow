@@ -5,7 +5,7 @@ use z3::Context as Z3Context;
 use z3::ast::{BV as Z3BitVec};
 
 use crate::helper::{check_compatible, boxed};
-use super::{Integer, DataType, Symbol, SymCondition, Traversed};
+use super::{Symbol, SymCondition, Integer, DataType, Traversed};
 use super::smt::{Z3Parser, FromAstError};
 use SymExpr::*;
 use SymCondition::*;
@@ -296,7 +296,7 @@ impl Display for SymExpr {
             BitAnd(a, b) => write!(f, "({} & {})", a, b),
             BitOr(a, b) => write!(f, "({} | {})", a, b),
             BitNot(a) => write!(f, "(!{})", a),
-            Cast(x, new, signed) => write!(f, "({} as {} {})", x, new, signed_name(*signed)),
+            Cast(x, new, signed) => write!(f, "({} as {}{})", x, new, signed_name(*signed)),
             AsExpr(c, data_type) => write!(f, "({} as {})", c, data_type),
             IfThenElse(c, a, b) => write!(f, "if {} then {} else {}", c, a, b),
         }

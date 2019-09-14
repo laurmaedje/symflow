@@ -5,11 +5,10 @@ use std::fmt::{self, Display, Debug, Formatter};
 use z3::Context as Z3Context;
 use z3::ast::Ast;
 
-use crate::helper::boxed;
-use super::{SymExpr, SymCondition, SymDynamic, Symbol};
-use super::{Integer, DataType::*};
+use super::{SymExpr, SymCondition, SymDynamic, Symbol, Integer, DataType};
 use SymExpr::*;
 use SymCondition::*;
+use DataType::*;
 
 
 /// Solves and simplifies conditions and expressions using Z3.
@@ -30,9 +29,17 @@ impl Solver {
 
     /// Simplify an expression.
     pub fn simplify_expr(&self, expr: &SymExpr) -> SymExpr {
+        // No need to symplify atomic expressions.
+        match expr {
+            Int(x) => return Int(*x),
+            Sym(s) => return Sym(*s),
+            _ => {},
+        }
+
         let z3_expr = expr.to_z3_ast(&self.ctx);
         let params = self.params();
         let z3_simplified = z3_expr.simplify_ex(&params).simplify_ex(&params);
+
         SymExpr::from_z3_ast(&z3_simplified).unwrap_or_else(|err| {
             panic!("condition solver: failed to simplify expression: {}\n{}", expr, err);
         })
@@ -40,10 +47,16 @@ impl Solver {
 
     /// Simplify a condition.
     pub fn simplify_condition(&self, cond: &SymCondition) -> SymCondition {
+        // Just a bool has no need to be simplified.
+        if let Bool(x) = cond {
+            return Bool(*x);
+        }
+
         if self.check_sat(&cond) {
             let z3_cond = cond.to_z3_ast(&self.ctx);
             let params = self.params();
             let z3_simplified = z3_cond.simplify_ex(&params).simplify_ex(&params);
+
             SymCondition::from_z3_ast(&z3_simplified).unwrap_or_else(|err| {
                 panic!("warning: condition solver: failed to simplify condition: {}\n{}", cond, err);
             })
@@ -172,12 +185,12 @@ impl<'a> Z3Parser<'a> {
                 }
             },
 
-            "bvadd" => self.parse_bv_varop(Add)?,
-            "bvsub" => self.parse_bv_varop(Sub)?,
-            "bvmul" => self.parse_bv_varop(Mul)?,
-            "bvand" => self.parse_bv_varop(BitAnd)?,
-            "bvor"  => self.parse_bv_varop(BitOr)?,
-            "bvnot" => BitNot(self.bv()?),
+            "bvadd" => self.parse_bv_varop(SymExpr::add)?,
+            "bvsub" => self.parse_bv_varop(SymExpr::sub)?,
+            "bvmul" => self.parse_bv_varop(SymExpr::mul)?,
+            "bvand" => self.parse_bv_varop(SymExpr::bitand)?,
+            "bvor"  => self.parse_bv_varop(SymExpr::bitor)?,
+            "bvnot" => self.parse_bitvec()?.bitnot(),
 
             "ite" => {
                 let condition = self.parse_bool()?;
@@ -208,12 +221,12 @@ impl<'a> Z3Parser<'a> {
 
     /// Parse a bitvector function with variable number of arguments.
     fn parse_bv_varop<F>(&mut self, op: F) -> ParseResult<SymExpr>
-    where F: Fn(Box<SymExpr>, Box<SymExpr>) -> SymExpr {
-        let mut expr = op(self.bv()?, self.bv()?);
+    where F: Fn(SymExpr, SymExpr) -> SymExpr {
+        let mut expr = op(self.parse_bitvec()?, self.parse_bitvec()?);
 
         self.skip_white();
         while self.peek() != Some(')') {
-            expr = op(boxed(expr), self.bv()?);
+            expr = op(expr, self.parse_bitvec()?);
             self.skip_white();
         }
 
@@ -296,16 +309,16 @@ impl<'a> Z3Parser<'a> {
         let cond = match func {
             "let" => { self.parse_let_bindings()?; self.parse_bool()? },
 
-            "=" => Equal(self.bv()?, self.bv()?),
+            "=" => self.parse_bitvec()?.equal(self.parse_bitvec()?),
 
-            "bvult" | "bvslt" => LessThan(self.bv()?, self.bv()?, signed()),
-            "bvule" | "bvsle" => LessEqual(self.bv()?, self.bv()?, signed()),
-            "bvugt" | "bvsgt" => GreaterThan(self.bv()?, self.bv()?, signed()),
-            "bvuge" | "bvsge" => GreaterEqual(self.bv()?, self.bv()?, signed()),
+            "bvult" | "bvslt" => self.parse_bitvec()?.less_than(self.parse_bitvec()?, signed()),
+            "bvule" | "bvsle" => self.parse_bitvec()?.less_equal(self.parse_bitvec()?, signed()),
+            "bvugt" | "bvsgt" => self.parse_bitvec()?.greater_than(self.parse_bitvec()?, signed()),
+            "bvuge" | "bvsge" => self.parse_bitvec()?.greater_equal(self.parse_bitvec()?, signed()),
 
-            "and" => And(self.bl()?, self.bl()?),
-            "or" => Or(self.bl()?, self.bl()?),
-            "not" => Not(self.bl()?),
+            "and" => self.parse_bool()?.and(self.parse_bool()?),
+            "or" => self.parse_bool()?.or(self.parse_bool()?),
+            "not" => self.parse_bool()?.not(),
 
             _ => return err(format!("unknown boolean function: {:?}", func)),
         };
@@ -358,16 +371,6 @@ impl<'a> Z3Parser<'a> {
                 None => err(format!("let binding with name {:?} does not exist", name))
             }
         }
-    }
-
-    /// Parse the next boxed boolean.
-    fn bl(&mut self) -> ParseResult<Box<SymCondition>> {
-        self.parse_bool().map(boxed)
-    }
-
-    /// Parse the next boxed bitvec.
-    fn bv(&mut self) -> ParseResult<Box<SymExpr>> {
-        self.parse_bitvec().map(boxed)
     }
 
     /// Return everything until the next whitespace or parens.

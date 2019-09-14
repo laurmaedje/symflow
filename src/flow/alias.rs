@@ -4,10 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::rc::Rc;
 
-use crate::x86_64::Mnemoic;
-use crate::math::{Integer, DataType, SymExpr, SymCondition, SharedSolver, Solver, Traversed};
+use crate::math::{SymExpr, SymCondition, Integer, DataType, SharedSolver, Solver};
 use crate::sym::{SymState, MemoryStrategy, SymbolMap, TypedMemoryAccess};
-use super::{ControlFlowGraph, AbstractLocation, StorageLocation};
+use super::{ControlFlowGraph, ValueSource, AbstractLocation};
 use DataType::*;
 
 
@@ -86,16 +85,18 @@ impl<'g> AliasExplorer<'g> {
 
                 if is_target {
                     let access = exp.state
-                        .get_access_for_location(self.target.storage)
+                        .get_access_for_storage(self.target.storage)
                         .expect("expected memory access at target");
 
                     exp.target_access = Some((access, exp.preconditions.len()));
                 } else {
                     for (source, _) in instruction.flows() {
-                        if let Some(access) = exp.state.get_access_for_location(source) {
-                            let trace = exp.state.trace.clone();
-                            let location = AbstractLocation::new(addr, trace, source);
-                            self.handle_read_access(&exp, access, location);
+                        if let ValueSource::Storage(storage) = source {
+                            if let Some(access) = exp.state.get_access_for_storage(storage) {
+                                let trace = exp.state.trace.clone();
+                                let location = AbstractLocation::new(addr, trace, storage);
+                                self.handle_read_access(&exp, access, location);
+                            }
                         }
                     }
                 }
@@ -141,8 +142,7 @@ impl<'g> AliasExplorer<'g> {
         location: AbstractLocation
     ) {
         let condition = if let Some((target_access, num_preconditions)) = &exp.target_access {
-            let mut condition =
-                determine_aliasing_condition(&self.solver, &target_access, &access).0;
+            let mut condition = determine_any_byte_condition(&self.solver, &target_access, &access);
 
             for pre in &exp.preconditions[*num_preconditions..] {
                 condition = condition.and(pre.clone());
@@ -206,40 +206,41 @@ impl<'g> AliasExplorer<'g> {
     }
 }
 
-/// Returns two condition under which `a` and `b` point to overlapping memory.
-/// - First: The condition under which they overlap on any byte.
-/// - Second: Whether they totally overlap in any case
-///           (i.e. they are a perfect match).
-pub fn determine_aliasing_condition(
+/// Returns the condition under which `a` contains any byte from `b`.
+pub fn determine_any_byte_condition(
     solver: &Solver,
     a: &TypedMemoryAccess,
     b: &TypedMemoryAccess
-) -> (SymCondition, bool) {
-    /// Return the condition under which `ptr` is in the area spanned by
-    /// pointer of `area` and the following bytes based on the data type.
-    fn contains_ptr(area: &TypedMemoryAccess, ptr: &SymExpr) -> SymCondition {
-        let area_len = SymExpr::Int(Integer::from_ptr(area.1.bytes() as u64));
-        let left = area.0.clone();
-        ptr.clone().sub(left).less_than(area_len, false)
-    }
+) -> SymCondition {
+    solver.simplify_condition(&match (a.1, b.1) {
+        (N8, N8) => a.0.clone().equal(b.0.clone()),
+        (N8, _) => contains_ptr(b, &a.0),
+        (_, N8) => contains_ptr(a, &b.0),
+        (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
+    })
+}
 
-    let perfect_match = a.1 == b.1 && solver.check_always_equal(&a.0, &b.0);
-
-    // The data accesses are overlapping if the area of the first one contains
-    // the second one or the other way around, where the area is the memory
-    // from the start of the pointer until the start + the byte width.
-    let condition = if perfect_match {
-        SymCondition::TRUE
+/// Returns the condition under which `a` contains all bytes from `b`.
+pub fn determine_all_bytes_condition(
+    solver: &Solver,
+    a: &TypedMemoryAccess,
+    b: &TypedMemoryAccess
+) -> SymCondition {
+    solver.simplify_condition(&if a.1 == b.1 {
+        a.0.clone().equal(b.0.clone())
+    } else if a.1 > b.1 {
+        contains_ptr(a, &b.0)
     } else {
-        solver.simplify_condition(&match (a.1, b.1) {
-            (N8, N8) => a.0.clone().equal(b.0.clone()),
-            (N8, _) => contains_ptr(b, &a.0),
-            (_, N8) => contains_ptr(a, &b.0),
-            (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
-        })
-    };
+        SymCondition::FALSE
+    })
+}
 
-    (condition, perfect_match)
+/// Return the condition under which `ptr` is in the area spanned by the
+/// pointer of `area` and the following bytes based on the data type.
+fn contains_ptr(area: &TypedMemoryAccess, ptr: &SymExpr) -> SymCondition {
+    let area_len = SymExpr::Int(Integer::from_ptr(area.1.bytes() as u64));
+    let left = area.0.clone();
+    ptr.clone().sub(left).less_than(area_len, false)
 }
 
 impl Display for AliasMap {
@@ -247,7 +248,7 @@ impl Display for AliasMap {
         write!(f, "AliasMap [")?;
         if !self.map.is_empty() { writeln!(f)?; }
         let mut map: Vec<_> = self.map.iter().collect();
-        map.sort_by_key(|pair| pair.0);
+        map.sort_by_key(|pair| pair.0.addr);
         for (location, (condition, symbols)) in map {
             writeln!(f, "    {}: {}", location, condition)?;
             if !symbols.is_empty() {

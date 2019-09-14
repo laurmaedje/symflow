@@ -5,10 +5,10 @@ use std::io::{self, Write};
 use std::rc::Rc;
 
 use crate::Program;
-use crate::x86_64::{Instruction, Mnemoic};
 use crate::ir::{Microcode, MicroEncoder};
-use crate::math::{Integer, DataType, SymExpr, SymCondition, Solver};
+use crate::math::{SymExpr, SymCondition, Integer, DataType, Solver};
 use crate::sym::{SymState, MemoryStrategy, Event};
+use crate::x86_64::{Instruction, Mnemoic};
 
 
 /// The control flow graph representation of a program.
@@ -490,6 +490,7 @@ mod tests {
         test("bufs");
         test("paths");
         test("deep");
+        test("overwrite");
     }
 
     fn test_decycle(left: Vec<&str>, right: Vec<&str>) {

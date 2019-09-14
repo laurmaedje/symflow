@@ -2,8 +2,8 @@
 
 use std::fmt::{self, Display, Formatter};
 
+use crate::math::{SymExpr, SymCondition, Integer, DataType, Symbol};
 use crate::x86_64::{Instruction, Mnemoic, Operand, Register};
-use crate::math::{Integer, DataType, SymExpr, SymCondition, Symbol};
 use Register::*;
 use SymCondition::*;
 
@@ -79,7 +79,7 @@ impl Display for MicroOperation {
         match self {
             Mov { dest, src } => write!(f, "mov {} = {}", dest, src),
             Const { dest, constant } => write!(f, "const {} = {}", dest, constant),
-            Cast { target, new, signed } => write!(f, "cast {} to {} {}",
+            Cast { target, new, signed } => write!(f, "cast {} to {}{}",
                 target, new, signed_name(*signed)),
 
             Add { sum, a, b } => write!(f, "add {} = {} + {}", sum, a, b),
@@ -671,7 +671,7 @@ mod tests {
         // Instruction: movzx eax, al
         test(&[0x0f, 0xb6, 0xc0], "
             mov T0:n8 = [m1][0x0:n8]
-            cast T0:n8 to n32 unsigned
+            cast T0:n8 to n32
             mov [m1][0x0:n32] = T0:n32
         ");
 

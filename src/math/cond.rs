@@ -5,7 +5,7 @@ use z3::Context as Z3Context;
 use z3::ast::{Ast, Bool as Z3Bool};
 
 use crate::helper::{check_compatible, boxed};
-use super::{Integer, DataType, SymExpr, Symbol, Traversed};
+use super::{SymExpr, Symbol, Integer, DataType, Traversed};
 use super::smt::{Z3Parser, FromAstError};
 use SymCondition::*;
 use SymExpr::*;
@@ -27,10 +27,12 @@ pub enum SymCondition {
 }
 
 macro_rules! bin_cond  {
-    ($func:ident, $op:tt, $variant:ident) => {
+    ($func:ident, $op:tt, $variant:ident, $neutral:expr, $del:expr) => {
         pub fn $func(self, other: SymCondition) -> SymCondition {
             match (self, other) {
                 (Bool(a), Bool(b)) => Bool(a $op b),
+                (_, Bool($del)) | (Bool($del), _) => Bool($del),
+                (a, Bool($neutral)) | (Bool($neutral), a) => a,
                 (a, b) => $variant(Box::new(a), Box::new(b)),
             }
         }
@@ -85,8 +87,8 @@ impl SymCondition {
         }
     }
 
-    bin_cond!(and, &&, And);
-    bin_cond!(or, ||, Or);
+    bin_cond!(and, &&, And, true, false);
+    bin_cond!(or, ||, Or, false, true);
 
     pub fn not(self) -> SymCondition {
         match self {
@@ -142,10 +144,10 @@ impl Display for SymCondition {
         match self {
             Bool(b) => write!(f, "{}", b),
             Equal(a, b) => write!(f, "({} == {})", a, b),
-            LessThan(a, b, s) => write!(f, "({} < {} {})", a, b, signed_name(*s)),
-            LessEqual(a, b, s) => write!(f, "({} <= {} {})", a, b, signed_name(*s)),
-            GreaterThan(a, b, s) => write!(f, "({} > {} {})", a, b, signed_name(*s)),
-            GreaterEqual(a, b, s) => write!(f, "({} >= {} {})", a, b, signed_name(*s)),
+            LessThan(a, b, s) => write!(f, "({} < {}{})", a, b, signed_name(*s)),
+            LessEqual(a, b, s) => write!(f, "({} <= {}{})", a, b, signed_name(*s)),
+            GreaterThan(a, b, s) => write!(f, "({} > {}{})", a, b, signed_name(*s)),
+            GreaterEqual(a, b, s) => write!(f, "({} >= {}{})", a, b, signed_name(*s)),
             And(a, b) => write!(f, "({} and {})", a, b),
             Or(a, b) => write!(f, "({} or {})", a, b),
             Not(a) => write!(f, "(not {})", a),
