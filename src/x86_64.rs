@@ -123,11 +123,11 @@ impl Instruction {
 
             Push => {
                 let target = get!(self.operands[0]);
-                vec![(stg(target), stack(target.data_type(), true))]
+                vec![(stg(reg(RSP)), reg(RSP)), (stg(target), stack(target.data_type(), true))]
             },
             Pop => {
                 let target = get!(self.operands[0]);
-                vec![(stg(stack(target.data_type(), false)), target)]
+                vec![(stg(reg(RSP)), reg(RSP)), (stg(stack(target.data_type(), false)), target)]
             },
 
             Call => vec![(stg(reg(RIP)), stack(N64, true))],

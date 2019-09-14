@@ -120,10 +120,11 @@ struct ExplorationTarget {
     /// The set of all conditions (through ifs) met on this path.
     preconditions: Vec<SymCondition>,
 
-    /// For each storage location that was already used we stored the abstract
+    /// For each storage location that was already used we store the abstract
     /// location node were it was written, so we can add an edge back to it
-    /// when we use this storage.
-    location_links: HashMap<StorageLocation, usize>,
+    /// when we use this storage. The latter usize holds the number of preconditions
+    /// we with the write accesses.
+    location_links: HashMap<StorageLocation, (usize, usize)>,
 
     /// All past writing memory accesses with their abstract location index (node id).
     /// The last usize holds the number of preconditions that were already active
@@ -199,7 +200,7 @@ impl<'g> ValueFlowExplorer<'g> {
 
                         ValueSource::Const(int) => {
                             let index = self.insert_node(ValueFlowNode::Constant(sink_index, int));
-                            self.insert_pre_edge(&exp, index, sink_index);
+                            self.insert_pre_edge(&exp, 0, index, sink_index);
 
                             None
                         }
@@ -286,20 +287,25 @@ impl<'g> ValueFlowExplorer<'g> {
         for (symbol, access) in ios {
             // Add to the previous links list.
             let location = exp.state.symbol_map[&symbol].clone();
-            let node_index = self.insert_node(ValueFlowNode::Location(location.clone()));
-            exp.location_links.insert(location.storage.normalized(), node_index);
+            let location_index = self.insert_node(ValueFlowNode::Location(location.clone()));
             let index = self.insert_node(ValueFlowNode::Io(kind, symbol));
+
+            // Store the location node so it can be backlinked.
+            exp.location_links.insert(
+                location.storage.normalized(),
+                (location_index, exp.preconditions.len())
+            );
 
             // If it is a stdin read, that is, a memory write, add it
             // to the write access list.
             match kind {
                 StdioKind::Stdin => {
-                    exp.write_accesses.push((node_index, access, exp.preconditions.len()));
-                    self.insert_pre_edge(&exp, index, node_index);
+                    exp.write_accesses.push((location_index, access, exp.preconditions.len()));
+                    self.insert_pre_edge(&exp, 0, index, location_index);
                 },
                 StdioKind::Stdout => {
-                    self.handle_read_access(exp, access, node_index);
-                    self.insert_pre_edge(&exp, node_index, index);
+                    self.handle_read_access(exp, access, location_index);
+                    self.insert_pre_edge(&exp, 0, location_index, index);
                 },
             }
         }
@@ -374,12 +380,12 @@ impl<'g> ValueFlowExplorer<'g> {
         // Add a link to the previous abstract location of the same
         // storage location if it was used before.
         if !overwritten {
-            if let Some(prev) = exp.location_links.get(&location) {
-                self.insert_true_edge(*prev, location_index);
+            if let Some((prev, num_preconditions)) = exp.location_links.get(&location) {
+                self.insert_pre_edge(&exp, *num_preconditions, *prev, location_index);
             }
         }
 
-        exp.location_links.insert(location, location_index);
+        exp.location_links.insert(location, (location_index, exp.preconditions.len()));
     }
 
     /// Insert a new abstract location node for a storage location in a context.
@@ -397,15 +403,21 @@ impl<'g> ValueFlowExplorer<'g> {
         *self.nodes.entry(node).or_insert(new_index)
     }
 
-    /// Insert an edge with condition TRUE.
+    /// Insert an edge with condition true overwriting any previous edge.
     fn insert_true_edge(&mut self, from: usize, to: usize) {
         self.edges.insert((from, to), (SymCondition::TRUE, SymbolMap::new()));
     }
 
     /// Insert an edge with the precondition of the exploration target.
-    fn insert_pre_edge(&mut self, exp: &ExplorationTarget, from: usize, to: usize) {
+    fn insert_pre_edge(
+        &mut self,
+        exp: &ExplorationTarget,
+        num_preconditions: usize,
+        from: usize,
+        to: usize
+    ) {
         let mut condition = SymCondition::TRUE;
-        for pre in &exp.preconditions {
+        for pre in &exp.preconditions[num_preconditions..] {
             condition = condition.and(pre.clone());
         }
         self.insert_edge(exp, from, to, condition);
