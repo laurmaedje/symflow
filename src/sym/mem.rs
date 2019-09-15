@@ -72,12 +72,14 @@ impl SymMemory {
 
     /// Read from a symbolic address.
     pub fn read_expr(&self, addr: SymExpr, data_type: DataType) -> SymExpr {
-        let expr = match self.strategy {
-            MemoryStrategy::PerfectMatches => self.read_perfect(addr, data_type),
-            MemoryStrategy::ConditionalTrees => self.read_conditional(addr, data_type),
-        };
+        crate::timings::with("sym-mem", || {
+            let expr = match self.strategy {
+                MemoryStrategy::PerfectMatches => self.read_perfect(addr, data_type),
+                MemoryStrategy::ConditionalTrees => self.read_conditional(addr, data_type),
+            };
 
-        if expr.data_type() == data_type { expr } else { expr.cast(data_type, false) }
+            if expr.data_type() == data_type { expr } else { expr.cast(data_type, false) }
+        })
     }
 
     /// Read from memory using the perfect matches strategy.
@@ -150,20 +152,22 @@ impl SymMemory {
 
     /// Write a value to a symbolic address.
     pub fn write_expr(&mut self, addr: SymExpr, value: SymExpr) {
-        let mut data = self.data.borrow_mut();
+        crate::timings::with("sym-mem", || {
+            let mut data = self.data.borrow_mut();
 
-        let new_write = MemoryWrite { addr, value };
+            let new_write = MemoryWrite { addr, value };
 
-        for (_, write) in data.writes.iter_mut().rev() {
-            if write.addr == new_write.addr {
-                *write = new_write;
-                return;
+            for (_, write) in data.writes.iter_mut().rev() {
+                if write.addr == new_write.addr {
+                    *write = new_write;
+                    return;
+                }
             }
-        }
 
-        let epoch = data.epoch;
-        data.writes.insert(epoch, new_write);
-        data.epoch += 1;
+            let epoch = data.epoch;
+            data.writes.insert(epoch, new_write);
+            data.epoch += 1;
+        })
     }
 }
 

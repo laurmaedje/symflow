@@ -76,6 +76,8 @@ impl SymState {
     pub fn step(&mut self, addr: u64, operation: &MicroOperation) -> Option<Event> {
         use MicroOperation as Op;
 
+        crate::timings::start("sym-step");
+
         self.set_reg(Register::RIP, SymExpr::from_ptr(addr));
         self.ip = addr;
 
@@ -100,6 +102,7 @@ impl SymState {
                 self.set_temp(*target, self.evaluate_condition(&condition).as_expr(target.0));
             },
             Op::Jump { target, condition, relative } => {
+                crate::timings::stop();
                 return Some(Event::Jump {
                     target: self.get_temp(*target),
                     condition: condition.clone(),
@@ -110,6 +113,7 @@ impl SymState {
             Op::Syscall => {
                 if let SymExpr::Int(int) = self.get_reg(Register::RAX) {
                     if let Some(event) = self.do_syscall(int.1) {
+                        crate::timings::stop();
                         return Some(event);
                     }
                 } else {
@@ -118,6 +122,7 @@ impl SymState {
             },
         }
 
+        crate::timings::stop();
         None
     }
 

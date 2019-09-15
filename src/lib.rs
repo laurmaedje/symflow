@@ -10,6 +10,7 @@ use crate::elf::ElfFile;
 use crate::ir::{Microcode, MicroEncoder};
 use crate::x86_64::Instruction;
 
+
 /// Helper functions and macros that are used across the crate.
 #[macro_use]
 mod helper {
@@ -55,6 +56,14 @@ pub mod elf;
 pub mod ir;
 pub mod x86_64;
 
+#[cfg(feature = "timings")]
+pub mod timings;
+#[cfg(not(feature = "timings"))]
+mod timings {
+    pub(crate) fn with<S: Into<String>, F, T>(_: S, f: F) -> T where F: FnOnce() -> T { f() }
+    pub(crate) fn start<S>(_: S) {}
+    pub(crate) fn stop() {}
+}
 
 /// A decoded binary file.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -69,6 +78,8 @@ pub struct Program {
 impl Program {
     /// Create a new program from a 64-bit ELF file.
     pub fn new<P: AsRef<Path>>(filename: P) -> Program {
+        crate::timings::start("program");
+
         let mut file = ElfFile::new(filename).unwrap();
         let text = file.get_section(".text").unwrap();
 
@@ -98,6 +109,8 @@ impl Program {
                 }
             }
         }
+
+        crate::timings::stop();
 
         Program {
             base,

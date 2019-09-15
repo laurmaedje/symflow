@@ -20,7 +20,7 @@ pub struct AliasMap {
 impl AliasMap {
     /// Create a new alias map for a target abstract location.
     pub fn new(graph: &ControlFlowGraph, target: &AbstractLocation) -> AliasMap {
-        AliasExplorer::new(graph, target).run()
+        crate::timings::with("alias-map", || AliasExplorer::new(graph, target).run())
     }
 }
 
@@ -212,11 +212,15 @@ pub fn determine_any_byte_condition(
     a: &TypedMemoryAccess,
     b: &TypedMemoryAccess
 ) -> SymCondition {
-    solver.simplify_condition(&match (a.1, b.1) {
-        (N8, N8) => a.0.clone().equal(b.0.clone()),
-        (N8, _) => contains_ptr(b, &a.0),
-        (_, N8) => contains_ptr(a, &b.0),
-        (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
+    crate::timings::with("determine-alias", || {
+    crate::timings::with("determine-any-byte", || {
+        solver.simplify_condition(&match (a.1, b.1) {
+            (N8, N8) => a.0.clone().equal(b.0.clone()),
+            (N8, _) => contains_ptr(b, &a.0),
+            (_, N8) => contains_ptr(a, &b.0),
+            (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
+        })
+    })
     })
 }
 
@@ -226,12 +230,16 @@ pub fn determine_all_bytes_condition(
     a: &TypedMemoryAccess,
     b: &TypedMemoryAccess
 ) -> SymCondition {
-    solver.simplify_condition(&if a.1 == b.1 {
-        a.0.clone().equal(b.0.clone())
-    } else if a.1 > b.1 {
-        contains_ptr(a, &b.0)
-    } else {
-        SymCondition::FALSE
+    crate::timings::with("determine-alias", || {
+    crate::timings::with("determine-all-bytes", || {
+        solver.simplify_condition(&if a.1 == b.1 {
+            a.0.clone().equal(b.0.clone())
+        } else if a.1 > b.1 {
+            contains_ptr(a, &b.0)
+        } else {
+            SymCondition::FALSE
+        })
+    })
     })
 }
 
@@ -286,6 +294,8 @@ mod tests {
         fs::create_dir("target/out/alias").ok();
         let alias_path = format!("target/out/alias/{}.txt", filename);
         let mut alias_file = File::create(alias_path).unwrap();
+
+        writeln!(alias_file, "Alias map for {}\n", filename).unwrap();;
         write!(alias_file, "{}", map).unwrap();
 
         map

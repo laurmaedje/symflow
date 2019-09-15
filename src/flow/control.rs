@@ -62,7 +62,7 @@ pub struct BasicBlock {
 impl ControlFlowGraph {
     /// Generate a control flow graph of a program.
     pub fn new(program: &Program) -> ControlFlowGraph {
-        ControlFlowExplorer::new(program).run()
+        crate::timings::with("control-flow-graph", || ControlFlowExplorer::new(program).run())
     }
 
     /// Visualize this flow graph in a graphviz DOT file.

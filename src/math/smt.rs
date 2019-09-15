@@ -36,13 +36,18 @@ impl Solver {
             _ => {},
         }
 
+        crate::timings::start("simplify");
+
         let z3_expr = expr.to_z3_ast(&self.ctx);
         let params = self.params();
         let z3_simplified = z3_expr.simplify_ex(&params).simplify_ex(&params);
 
-        SymExpr::from_z3_ast(&z3_simplified).unwrap_or_else(|err| {
+        let res = SymExpr::from_z3_ast(&z3_simplified).unwrap_or_else(|err| {
             panic!("condition solver: failed to simplify expression: {}\n{}", expr, err);
-        })
+        });
+
+        crate::timings::stop();
+        res
     }
 
     /// Simplify a condition.
@@ -52,8 +57,17 @@ impl Solver {
             return Bool(*x);
         }
 
-        if self.check_sat(&cond) {
-            let z3_cond = cond.to_z3_ast(&self.ctx);
+        crate::timings::start("simplify");
+
+        let z3_cond = cond.to_z3_ast(&self.ctx);
+        let solver = z3::Solver::new(&self.ctx);
+
+        crate::timings::start("check-sat");
+        solver.assert(&z3_cond);
+        let sat = solver.check();
+        crate::timings::stop();
+
+        let res = if sat {
             let params = self.params();
             let z3_simplified = z3_cond.simplify_ex(&params).simplify_ex(&params);
 
@@ -62,33 +76,23 @@ impl Solver {
             })
         } else {
             SymCondition::FALSE
-        }
-    }
+        };
 
-    /// Check whether the condition is satisfiable.
-    pub fn check_sat(&self, cond: &SymCondition) -> bool {
-        let z3_cond = cond.to_z3_ast(&self.ctx);
-        let solver = z3::Solver::new(&self.ctx);
-        solver.assert(&z3_cond);
-        solver.check()
+        crate::timings::stop();
+        res
     }
 
     /// Check whether two expressions are possibly equal.
     pub fn check_equal_sat(&self, a: &SymExpr, b: &SymExpr) -> bool {
-        let z3_a = a.to_z3_ast(&self.ctx);
-        let z3_b = b.to_z3_ast(&self.ctx);
-        let solver = z3::Solver::new(&self.ctx);
-        solver.assert(&z3_a._eq(&z3_b));
-        solver.check()
-    }
-
-    /// Check whether two expressions are possibly equal.
-    pub fn check_always_equal(&self, a: &SymExpr, b: &SymExpr) -> bool {
-        let z3_a = a.to_z3_ast(&self.ctx);
-        let z3_b = b.to_z3_ast(&self.ctx);
-        let solver = z3::Solver::new(&self.ctx);
-        solver.assert(&z3_a._eq(&z3_b).not());
-        !solver.check()
+        crate::timings::with("check-equal-sat", || {
+        crate::timings::with("check-sat", || {
+            let z3_a = a.to_z3_ast(&self.ctx);
+            let z3_b = b.to_z3_ast(&self.ctx);
+            let solver = z3::Solver::new(&self.ctx);
+            solver.assert(&z3_a._eq(&z3_b));
+            solver.check()
+        })
+        })
     }
 
     /// Builds the default simplifaction params.

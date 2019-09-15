@@ -32,7 +32,7 @@ pub enum ValueFlowNode {
 impl ValueFlowGraph {
     /// Create a new value flow graph for all abstract locations.
     pub fn new(graph: &ControlFlowGraph) -> ValueFlowGraph {
-        ValueFlowExplorer::new(graph).run()
+        crate::timings::with("value-flow-graph", || ValueFlowExplorer::new(graph).run())
     }
 
     /// Visualize this flow graph in a graphviz DOT file.
