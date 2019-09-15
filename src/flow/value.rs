@@ -330,6 +330,11 @@ impl<'g> ValueFlowExplorer<'g> {
                 _ => determine_any_byte_condition(&self.solver, prev, &access),
             };
 
+            // If this cannot match at all, we don't have to waste our time here.
+            if any_condition == SymCondition::FALSE {
+                continue;
+            }
+
             // Any condition that has to be met on this path *additionally* to those
             // already active for the current write have to be included in the conditions.
             for pre in &exp.preconditions[*num_preconditions..] {
@@ -341,14 +346,18 @@ impl<'g> ValueFlowExplorer<'g> {
             any_condition = any_condition.and(overwritten.clone().not());
             any_condition = self.solver.simplify_condition(&any_condition);
 
-            if any_condition != SymCondition::FALSE {
-                self.insert_edge(exp, *prev_index, location_index, any_condition);
+            // If this cannot match with the neccessary preconditions, we can skip this, too.
+            if any_condition == SymCondition::FALSE {
+                continue;
             }
 
-            // If the pointers alias in *any* case and both accesses are the same
-            // width this write would have definitely overwritten any previous one
-            // and we can quit this loop safely.
+            self.insert_edge(exp, *prev_index, location_index, any_condition);
+
+            // This is overwritten if it was before or is now.
             overwritten = self.solver.simplify_condition(&overwritten.or(all_condition));
+
+            // Any write before now would have definitely been overwritten, so
+            // we can quit this loop safely.
             if overwritten == SymCondition::TRUE {
                 break;
             }

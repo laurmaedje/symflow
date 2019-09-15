@@ -1,7 +1,5 @@
 //! Value flow analysis for x86-64 ELF binaries based on symbolic execution 🚀
 
-// #![allow(unused)]
-
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
 use std::path::Path;
