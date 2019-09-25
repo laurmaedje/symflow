@@ -195,6 +195,8 @@ impl<'a> ControlFlowExplorer<'a> {
         });
 
         while let Some(mut exp) = self.stack.pop() {
+            self.insert_node(exp.node.decycled());
+
             // Explore this block and find all the ones reachable from this one.
             if let Some(exit) = self.execute_block(&mut exp) {
                 self.explore_exit(&exp, exit);
@@ -491,6 +493,7 @@ mod tests {
         test("paths");
         test("deep");
         test("overwrite");
+        test("min");
     }
 
     fn test_decycle(left: Vec<&str>, right: Vec<&str>) {

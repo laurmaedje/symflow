@@ -72,7 +72,9 @@ impl<'g> AliasExplorer<'g> {
 
         // Explore the relevant part of the flow graph in search of the memory accesses.
         while let Some(mut exp) = targets.pop() {
-            let node = &self.graph.nodes[exp.target];
+            let node = &self.graph.nodes.get(exp.target)
+                .expect("alias explorer: expected node in control flow graph");
+
             let block = &self.graph.blocks[&node.addr];
 
             // Simulate a basic block.

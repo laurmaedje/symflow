@@ -1,17 +1,33 @@
 names := \
 	block-1 block-2 case twice loop func \
 	recursive-1 recursive-2 \
-	bufs paths deep overwrite
+	bufs paths deep overwrite \
+	min
 
 target := ../target
 bins := $(addprefix $(target)/bin/, $(names))
 
+define disasm
+	@objdump -M intel -d $(1) > $(dir $(1))../dis/$(notdir $(1)).asm
+endef
+
+define mk
+	@mkdir -p $(target)/bin
+	@mkdir -p $(target)/dis
+endef
+
+
 all: $(bins)
 
 $(target)/bin/%: %.c
-	@mkdir -p $(target)/bin
-	@mkdir -p $(target)/dis
+	$(call mk)
 	gcc -nostdlib -o $@ $<
-	@objdump -M intel -d $@ > $(dir $@)../dis/$(notdir $@).asm
+	$(call disasm, $@)
+
+$(target)/bin/%: %.s
+	$(call mk)
+	as -o $@ $<
+	@strip $@
+	$(call disasm, $@)
 
 .PHONY: all

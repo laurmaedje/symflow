@@ -74,7 +74,7 @@ impl ValueFlowGraph {
 
         write_edges(&mut f, &self.edges, |f, ((start, end), (condition, _))| {
             if condition != &SymCondition::TRUE {
-                write!(f, "label=<")?;
+                write!(f, "label=< ")?;
                 let fmt = condition.to_string().replace("<", "&lt;").replace(">", "&gt;");
                 let mut len = 0;
                 for part in fmt.split(" ") {
@@ -163,7 +163,9 @@ impl<'g> ValueFlowExplorer<'g> {
         }];
 
         while let Some(mut exp) = targets.pop() {
-            let node = &self.graph.nodes[exp.target];
+            let node = &self.graph.nodes.get(exp.target)
+                .expect("value flow explorer: expected node in control flow graph");
+
             let block = &self.graph.blocks[&node.addr];
 
             // Simulate a basic block.
@@ -429,6 +431,8 @@ impl<'g> ValueFlowExplorer<'g> {
         for pre in &exp.preconditions[num_preconditions..] {
             condition = condition.and(pre.clone());
         }
+        condition = self.solver.simplify_condition(&condition);
+
         self.insert_edge(exp, from, to, condition);
     }
 
@@ -449,8 +453,10 @@ impl<'g> ValueFlowExplorer<'g> {
             condition = self.solver.simplify_condition(&prev.or(condition));
         }
 
-        let symbols = exp.state.get_symbol_map_for(&condition);
-        self.edges.insert(edge, (condition, symbols));
+        if condition != SymCondition::FALSE {
+            let symbols = exp.state.get_symbol_map_for(&condition);
+            self.edges.insert(edge, (condition, symbols));
+        }
     }
 }
 
@@ -477,4 +483,5 @@ mod tests {
     #[test] fn value_paths() { test("paths") }
     #[test] fn value_deep() { test("deep") }
     #[test] fn value_overwrite() { test("overwrite") }
+    #[test] fn value_min() { test("min") }
 }

@@ -1,4 +1,4 @@
-//! Value flow analysis for x86-64 ELF binaries based on symbolic execution 🚀
+//! Value flow analysis for x86-64 ELF binaries based on symbolic execution. 🚀
 
 use std::collections::HashMap;
 use std::fmt::{self, Display, Formatter};
@@ -169,5 +169,6 @@ mod tests {
         test("paths");
         test("deep");
         test("overwrite");
+        test("min");
     }
 }
