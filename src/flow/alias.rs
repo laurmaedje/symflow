@@ -144,7 +144,7 @@ impl<'g> AliasExplorer<'g> {
         location: AbstractLocation
     ) {
         let condition = if let Some((target_access, num_preconditions)) = &exp.target_access {
-            let mut condition = determine_any_byte_condition(&self.solver, &target_access, &access);
+            let mut condition = determine_alias(&target_access, &access);
 
             for pre in &exp.preconditions[*num_preconditions..] {
                 condition = condition.and(pre.clone());
@@ -209,40 +209,26 @@ impl<'g> AliasExplorer<'g> {
 }
 
 /// Returns the condition under which `a` contains any byte from `b`.
-pub fn determine_any_byte_condition(
-    solver: &Solver,
-    a: &TypedMemoryAccess,
-    b: &TypedMemoryAccess
-) -> SymCondition {
-    crate::timings::with("determine-alias", || {
-    crate::timings::with("determine-any-byte", || {
-        solver.simplify_condition(&match (a.1, b.1) {
-            (N8, N8) => a.0.clone().equal(b.0.clone()),
-            (N8, _) => contains_ptr(b, &a.0),
-            (_, N8) => contains_ptr(a, &b.0),
-            (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
-        })
-    })
-    })
+pub fn determine_alias(a: &TypedMemoryAccess, b: &TypedMemoryAccess) -> SymCondition {
+    if a == b { return SymCondition::TRUE; }
+    match (a.1, b.1) {
+        (N8, N8) => a.0.clone().equal(b.0.clone()),
+        (N8, _) => contains_ptr(b, &a.0),
+        (_, N8) => contains_ptr(a, &b.0),
+        (_, _) => contains_ptr(a, &b.0).or(contains_ptr(b, &a.0)),
+    }
 }
 
 /// Returns the condition under which `a` contains all bytes from `b`.
-pub fn determine_all_bytes_condition(
-    solver: &Solver,
-    a: &TypedMemoryAccess,
-    b: &TypedMemoryAccess
-) -> SymCondition {
-    crate::timings::with("determine-alias", || {
-    crate::timings::with("determine-all-bytes", || {
-        solver.simplify_condition(&if a.1 == b.1 {
-            a.0.clone().equal(b.0.clone())
-        } else if a.1 > b.1 {
-            contains_ptr(a, &b.0)
-        } else {
-            SymCondition::FALSE
-        })
-    })
-    })
+pub fn determine_full_alias(a: &TypedMemoryAccess, b: &TypedMemoryAccess) -> SymCondition {
+    if a == b { return SymCondition::TRUE; }
+    if a.1 == b.1 {
+        a.0.clone().equal(b.0.clone())
+    } else if a.1 > b.1 {
+        contains_ptr(a, &b.0)
+    } else {
+        SymCondition::FALSE
+    }
 }
 
 /// Return the condition under which `ptr` is in the area spanned by the

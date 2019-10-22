@@ -7,8 +7,7 @@ use std::rc::Rc;
 use crate::x86_64::Register;
 use crate::math::{SymCondition, Integer, Symbol, SharedSolver, Solver};
 use crate::sym::{SymState, Event, MemoryStrategy, TypedMemoryAccess, SymbolMap, StdioKind};
-use super::{ControlFlowGraph, ValueSource, AbstractLocation, StorageLocation};
-use super::{determine_any_byte_condition, determine_all_bytes_condition};
+use super::*;
 
 
 /// Contains the conditions under which values flow between abstract locations.
@@ -318,48 +317,45 @@ impl<'g> ValueFlowExplorer<'g> {
     fn handle_read_access(
         &mut self,
         exp: &ExplorationTarget,
-        access: TypedMemoryAccess,
+        read: TypedMemoryAccess,
         location_index: usize
     ) {
         let mut overwritten = SymCondition::FALSE;
 
         for (prev_index, prev, num_preconditions) in exp.write_accesses.iter().rev() {
-            // Determine the conditions that all bytes of our read were written by
-            // this write and that any byte was written.
-            let mut all_condition = determine_all_bytes_condition(&self.solver, prev, &access);
-            let mut any_condition = match all_condition {
-                SymCondition::TRUE => SymCondition::TRUE,
-                _ => determine_any_byte_condition(&self.solver, prev, &access),
-            };
-
-            // If this cannot match at all, we don't have to waste our time here.
-            if any_condition == SymCondition::FALSE {
-                continue;
-            }
+            let mut alias = determine_alias(prev, &read);
 
             // Any condition that has to be met on this path *additionally* to those
             // already active for the current write have to be included in the conditions.
             for pre in &exp.preconditions[*num_preconditions..] {
-                all_condition = all_condition.and(pre.clone());
-                any_condition = any_condition.and(pre.clone());
+                alias = alias.and(pre.clone());
             }
 
             // We have to make sure a later write has not overwritten this one.
-            any_condition = any_condition.and(overwritten.clone().not());
-            any_condition = self.solver.simplify_condition(&any_condition);
+            alias = alias.and(overwritten.clone().not());
+
+            crate::timings::with("simplify-alias", || {
+                alias = self.solver.simplify_condition(&alias);
+            });
 
             // If this cannot match with the neccessary preconditions, we can skip this, too.
-            if any_condition == SymCondition::FALSE {
+            if alias == SymCondition::FALSE {
                 continue;
             }
 
-            self.insert_edge(exp, *prev_index, location_index, any_condition);
+            self.insert_edge(exp, *prev_index, location_index, alias);
 
-            // This is overwritten if it was before or is now.
-            overwritten = self.solver.simplify_condition(&overwritten.or(all_condition));
+            // Determine the condition that the read access was overwritten by the
+            // write one.
+            let full = determine_full_alias(prev, &read);
+            overwritten = overwritten.or(full);
 
-            // Any write before now would have definitely been overwritten, so
-            // we can quit this loop safely.
+            crate::timings::with("simplify-overwrite", || {
+                overwritten = self.solver.simplify_condition(&overwritten);
+            });
+
+            // If this was surely overwritten, we don't have to bother with
+            // earlier things.
             if overwritten == SymCondition::TRUE {
                 break;
             }
@@ -431,7 +427,6 @@ impl<'g> ValueFlowExplorer<'g> {
         for pre in &exp.preconditions[num_preconditions..] {
             condition = condition.and(pre.clone());
         }
-        condition = self.solver.simplify_condition(&condition);
 
         self.insert_edge(exp, from, to, condition);
     }
@@ -450,7 +445,9 @@ impl<'g> ValueFlowExplorer<'g> {
         // it through a different path. If so, both are valid and we have
         // to take the disjunction of them.
         if let Some((prev, _)) = self.edges.remove(&edge) {
+            crate::timings::start("simplify-combine");
             condition = self.solver.simplify_condition(&prev.or(condition));
+            crate::timings::stop();
         }
 
         if condition != SymCondition::FALSE {
