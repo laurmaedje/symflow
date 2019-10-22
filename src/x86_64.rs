@@ -62,7 +62,7 @@ impl Instruction {
         lde::X64.ld(bytes) as u64
     }
 
-    /// Pairs of (source, sink) describing value flow in the instruction.
+    /// Pairs of (source, sink) describing data dependencies in the instruction.
     pub fn flows(&self) -> Vec<(ValueSource, StorageLocation)> {
         use Mnemoic::*;
         use Register::*;

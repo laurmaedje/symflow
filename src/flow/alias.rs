@@ -19,14 +19,14 @@ pub struct AliasMap {
 
 impl AliasMap {
     /// Create a new alias map for a target abstract location.
-    pub fn new(graph: &ControlFlowGraph, target: &AbstractLocation) -> AliasMap {
-        crate::timings::with("alias-map", || AliasExplorer::new(graph, target).run())
+    pub fn new(cfg: &ControlFlowGraph, target: &AbstractLocation) -> AliasMap {
+        crate::timings::with("alias-map", || AliasExplorer::new(cfg, target).run())
     }
 }
 
-/// Analyzes the value flow from a target and builds a map of conditions.
+/// Analyzes the aliasing conditions from a writing memory access with all reading ones.
 struct AliasExplorer<'g> {
-    graph: &'g ControlFlowGraph,
+    cfg: &'g ControlFlowGraph,
     target: &'g AbstractLocation,
     map: HashMap<AbstractLocation, (SymCondition, SymbolMap)>,
     solver: SharedSolver,
@@ -41,9 +41,9 @@ struct ExplorationTarget {
 }
 
 impl<'g> AliasExplorer<'g> {
-    fn new(graph: &'g ControlFlowGraph, target: &'g AbstractLocation) -> AliasExplorer<'g> {
+    fn new(cfg: &'g ControlFlowGraph, target: &'g AbstractLocation) -> AliasExplorer<'g> {
         AliasExplorer {
-            graph,
+            cfg,
             target,
             map: HashMap::new(),
             solver: Rc::new(Solver::new()),
@@ -72,10 +72,10 @@ impl<'g> AliasExplorer<'g> {
 
         // Explore the relevant part of the flow graph in search of the memory accesses.
         while let Some(mut exp) = targets.pop() {
-            let node = &self.graph.nodes.get(exp.target)
+            let node = &self.cfg.nodes.get(exp.target)
                 .expect("alias explorer: expected node in control flow graph");
 
-            let block = &self.graph.blocks[&node.addr];
+            let block = &self.cfg.blocks[&node.addr];
 
             // Simulate a basic block.
             for (addr, len, instruction, microcode) in &block.code {
@@ -112,9 +112,9 @@ impl<'g> AliasExplorer<'g> {
             }
 
             // Add all nodes reachable from that one as targets.
-            for &id in &self.graph.outgoing[exp.target] {
+            for &id in &self.cfg.outgoing[exp.target] {
                 if relevant.contains(&id) {
-                    let condition = &self.graph.edges[&(exp.target, id)];
+                    let condition = &self.cfg.edges[&(exp.target, id)];
                     let evaluated = exp.state.evaluate_condition(condition);
 
                     let mut preconditions = exp.preconditions.clone();
@@ -184,9 +184,9 @@ impl<'g> AliasExplorer<'g> {
         while let Some(target) = targets.pop() {
             if !reachable.contains(&target) {
                 targets.extend(if forward {
-                    &self.graph.outgoing[target]
+                    &self.cfg.outgoing[target]
                 } else {
-                    &self.graph.incoming[target]
+                    &self.cfg.incoming[target]
                 });
                 reachable.insert(target);
             }
@@ -197,8 +197,8 @@ impl<'g> AliasExplorer<'g> {
     /// Get all nodes whose blocks contain the given address.
     fn get_containing_nodes(&self, location: &AbstractLocation) -> Vec<usize> {
         let mut nodes = Vec::new();
-        for (index, node) in self.graph.nodes.iter().enumerate() {
-            let block = &self.graph.blocks[&node.addr];
+        for (index, node) in self.cfg.nodes.iter().enumerate() {
+            let block = &self.cfg.blocks[&node.addr];
             if location.addr >= block.addr && location.addr <= block.addr + block.len
                && location.trace.iter().eq(node.trace.iter().map(|(callsite, _)| callsite)) {
                 nodes.push(index);
@@ -209,7 +209,7 @@ impl<'g> AliasExplorer<'g> {
 }
 
 /// Returns the condition under which `a` contains any byte from `b`.
-pub fn determine_alias(a: &TypedMemoryAccess, b: &TypedMemoryAccess) -> SymCondition {
+pub(crate) fn determine_alias(a: &TypedMemoryAccess, b: &TypedMemoryAccess) -> SymCondition {
     if a == b { return SymCondition::TRUE; }
     match (a.1, b.1) {
         (N8, N8) => a.0.clone().equal(b.0.clone()),
@@ -220,7 +220,7 @@ pub fn determine_alias(a: &TypedMemoryAccess, b: &TypedMemoryAccess) -> SymCondi
 }
 
 /// Returns the condition under which `a` contains all bytes from `b`.
-pub fn determine_full_alias(a: &TypedMemoryAccess, b: &TypedMemoryAccess) -> SymCondition {
+pub(crate) fn determine_full_alias(a: &TypedMemoryAccess, b: &TypedMemoryAccess) -> SymCondition {
     if a == b { return SymCondition::TRUE; }
     if a.1 == b.1 {
         a.0.clone().equal(b.0.clone())

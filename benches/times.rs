@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::Write;
 
 use symflow::Program;
-use symflow::flow::{ControlFlowGraph, ValueFlowGraph};
+use symflow::flow::{ControlFlowGraph, DataDependencyGraph};
 use symflow::timings;
 
 
@@ -19,8 +19,8 @@ fn bench(filename: &str) {
     timings::reset();
 
     let program = Program::new(path);
-    let control_flow_graph = ControlFlowGraph::new(&program);
-    let _value_flow_graph = ValueFlowGraph::new(&control_flow_graph);
+    let cfg = ControlFlowGraph::new(&program);
+    let _ddg = DataDependencyGraph::new(&cfg);
 
     let measurements = timings::get();
 

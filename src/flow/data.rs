@@ -1,4 +1,4 @@
-//! Value flow analysis.
+//! Data flow analysis.
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -10,28 +10,28 @@ use crate::sym::{SymState, Event, MemoryStrategy, TypedMemoryAccess, SymbolMap, 
 use super::*;
 
 
-/// Contains the conditions under which values flow between abstract locations.
+/// Contains the conditions under which data flows between abstract locations.
 #[derive(Debug, Clone)]
-pub struct ValueFlowGraph {
+pub struct DataDependencyGraph {
     /// The nodes in the graph, i.e. all abstract locations in the executable.
-    pub nodes: Vec<ValueFlowNode>,
-    /// The conditions for value flow between the abstract locations.
+    pub nodes: Vec<DependencyNode>,
+    /// The conditions for data flow between the abstract locations.
     /// The key pairs are indices into the `nodes` vector.
     pub edges: HashMap<(usize, usize), (SymCondition, SymbolMap)>,
 }
 
-/// A node in the value flow graph, describing some kind of value.
+/// A node in the data dependency graph, describing some kind of value.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub enum ValueFlowNode {
+pub enum DependencyNode {
     Location(AbstractLocation),
     Io(StdioKind, Symbol),
     Constant(usize, Integer),
 }
 
-impl ValueFlowGraph {
-    /// Create a new value flow graph for all abstract locations.
-    pub fn new(graph: &ControlFlowGraph) -> ValueFlowGraph {
-        crate::timings::with("value-flow-graph", || ValueFlowExplorer::new(graph).run())
+impl DataDependencyGraph {
+    /// Create a new data dependency graph graph for all abstract locations.
+    pub fn new(cfg: &ControlFlowGraph) -> DataDependencyGraph {
+        crate::timings::with("data-dependency-graph", || DataFlowExplorer::new(cfg).run())
     }
 
     /// Visualize this flow graph in a graphviz DOT file.
@@ -43,18 +43,18 @@ impl ValueFlowGraph {
         use super::visualize::*;
         let mut f = target;
 
-        write_header(&mut f, &format!("Value flow graph for {}", title), 40)?;
+        write_header(&mut f, &format!("Data dependency graph for {}", title), 40)?;
 
         for (index, node) in self.nodes.iter().enumerate() {
             match node {
-                ValueFlowNode::Location(location) => {
+                DependencyNode::Location(location) => {
                     let fmt = location.to_string().replace(">", "&gt;");
                     let mut splitter = fmt.splitn(2, ' ');
                     writeln!(f, "b{} [label=<<b>{}</b> {}>,shape=box]", index,
                                 splitter.next().unwrap(), splitter.next().unwrap())?;
                 },
 
-                ValueFlowNode::Io(kind, symbol) => {
+                DependencyNode::Io(kind, symbol) => {
                     let color = match kind {
                         StdioKind::Stdin => "#4caf50",
                         StdioKind::Stdout => "#03a9f4",
@@ -64,7 +64,7 @@ impl ValueFlowGraph {
                                 index, symbol, color)?;
                 },
 
-                ValueFlowNode::Constant(_, int) => {
+                DependencyNode::Constant(_, int) => {
                     writeln!(f, "b{} [label=<{}>,shape=box,style=filled,fillcolor=\"#f0ce24\"]",
                          index, int)?;
                 },
@@ -87,8 +87,8 @@ impl ValueFlowGraph {
                 write!(f, ">, ")?;
             }
 
-            if let ValueFlowNode::Location(first) = &self.nodes[start] {
-                if let ValueFlowNode::Location(second) = &self.nodes[end] {
+            if let DependencyNode::Location(first) = &self.nodes[start] {
+                if let DependencyNode::Location(second) = &self.nodes[end] {
                     if !first.storage.accesses_memory() &&
                         first.storage.normalized() == second.storage.normalized() {
                         write!(f, "style=dashed, color=\"#ababab\"")?;
@@ -103,11 +103,11 @@ impl ValueFlowGraph {
     }
 }
 
-/// Analyses the value flow in the whole executable, building a value flow graph.
-struct ValueFlowExplorer<'g> {
-    graph: &'g ControlFlowGraph,
+/// Analyses the data flow in the whole executable, building a data dependency graph.
+struct DataFlowExplorer<'g> {
+    cfg: &'g ControlFlowGraph,
     solver: SharedSolver,
-    nodes: HashMap<ValueFlowNode, usize>,
+    nodes: HashMap<DependencyNode, usize>,
     edges: HashMap<(usize, usize), (SymCondition, SymbolMap)>,
 }
 
@@ -132,17 +132,17 @@ struct ExplorationTarget {
     write_accesses: Vec<(usize, TypedMemoryAccess, usize)>
 }
 
-impl<'g> ValueFlowExplorer<'g> {
-    fn new(graph: &'g ControlFlowGraph) -> ValueFlowExplorer<'g> {
-        ValueFlowExplorer {
-            graph,
+impl<'g> DataFlowExplorer<'g> {
+    fn new(cfg: &'g ControlFlowGraph) -> DataFlowExplorer<'g> {
+        DataFlowExplorer {
+            cfg,
             solver: Rc::new(Solver::new()),
             nodes: HashMap::new(),
             edges: HashMap::new(),
         }
     }
 
-    /// Build the value flow graph.
+    /// Build the data dependency graph.
     ///
     /// This function traverses the complete control flow graph,
     /// symbolically executing each path.
@@ -150,7 +150,7 @@ impl<'g> ValueFlowExplorer<'g> {
     /// All direct flows are translated into edges with condition _True_ in the
     /// graph. Indirect flows through memory can have more complex conditions
     /// associated with them.
-    fn run(mut self) -> ValueFlowGraph {
+    fn run(mut self) -> DataDependencyGraph {
         let base_state = SymState::new(MemoryStrategy::ConditionalTrees, self.solver.clone());
 
         let mut targets = vec![ExplorationTarget {
@@ -162,10 +162,10 @@ impl<'g> ValueFlowExplorer<'g> {
         }];
 
         while let Some(mut exp) = targets.pop() {
-            let node = &self.graph.nodes.get(exp.target)
-                .expect("value flow explorer: expected node in control flow graph");
+            let node = &self.cfg.nodes.get(exp.target)
+                .expect("data flow explorer: expected node in control flow graph");
 
-            let block = &self.graph.blocks[&node.addr];
+            let block = &self.cfg.blocks[&node.addr];
 
             // Simulate a basic block.
             for (addr, len, instruction, microcode) in &block.code {
@@ -200,7 +200,7 @@ impl<'g> ValueFlowExplorer<'g> {
                         },
 
                         ValueSource::Const(int) => {
-                            let index = self.insert_node(ValueFlowNode::Constant(sink_index, int));
+                            let index = self.insert_node(DependencyNode::Constant(sink_index, int));
                             self.insert_pre_edge(&exp, 0, index, sink_index);
 
                             None
@@ -240,8 +240,8 @@ impl<'g> ValueFlowExplorer<'g> {
             }
 
             // Add all nodes reachable from that one as targets.
-            for &id in &self.graph.outgoing[exp.target] {
-                let condition = &self.graph.edges[&(exp.target, id)];
+            for &id in &self.cfg.outgoing[exp.target] {
+                let condition = &self.cfg.edges[&(exp.target, id)];
 
                 // If the arrow to the next basic block has a condition, we
                 // have an additional precondition which we AND with the existing one.
@@ -264,15 +264,15 @@ impl<'g> ValueFlowExplorer<'g> {
     }
 
     /// Arrange all data in the way expected for the flow graph.
-    fn finish(self) -> ValueFlowGraph {
+    fn finish(self) -> DataDependencyGraph {
         // Arrange the nodes into a vector.
-        let default = ValueFlowNode::Constant(0, Integer::from_ptr(0));
+        let default = DependencyNode::Constant(0, Integer::from_ptr(0));
         let mut nodes = vec![default; self.nodes.len()];
         for (node, index) in self.nodes.into_iter() {
             nodes[index] = node;
         }
 
-        ValueFlowGraph {
+        DataDependencyGraph {
             nodes,
             edges: self.edges,
         }
@@ -288,8 +288,8 @@ impl<'g> ValueFlowExplorer<'g> {
         for (symbol, access) in ios {
             // Add to the previous links list.
             let location = exp.state.symbol_map[&symbol].clone();
-            let location_index = self.insert_node(ValueFlowNode::Location(location.clone()));
-            let index = self.insert_node(ValueFlowNode::Io(kind, symbol));
+            let location_index = self.insert_node(DependencyNode::Location(location.clone()));
+            let index = self.insert_node(DependencyNode::Io(kind, symbol));
 
             // Store the location node so it can be backlinked.
             exp.location_links.insert(
@@ -339,25 +339,23 @@ impl<'g> ValueFlowExplorer<'g> {
             });
 
             // If this cannot match with the neccessary preconditions, we can skip this, too.
-            if alias == SymCondition::FALSE {
-                continue;
-            }
+            if alias != SymCondition::FALSE {
+                self.insert_edge(exp, *prev_index, location_index, alias);
 
-            self.insert_edge(exp, *prev_index, location_index, alias);
+                // Determine the condition that the read access was overwritten by the
+                // write one.
+                let full = determine_full_alias(prev, &read);
+                overwritten = overwritten.or(full);
 
-            // Determine the condition that the read access was overwritten by the
-            // write one.
-            let full = determine_full_alias(prev, &read);
-            overwritten = overwritten.or(full);
+                crate::timings::with("simplify-overwrite", || {
+                    overwritten = self.solver.simplify_condition(&overwritten);
+                });
 
-            crate::timings::with("simplify-overwrite", || {
-                overwritten = self.solver.simplify_condition(&overwritten);
-            });
-
-            // If this was surely overwritten, we don't have to bother with
-            // earlier things.
-            if overwritten == SymCondition::TRUE {
-                break;
+                // If this was surely overwritten, we don't have to bother with
+                // earlier things.
+                if overwritten == SymCondition::TRUE {
+                    break;
+                }
             }
         }
     }
@@ -398,14 +396,14 @@ impl<'g> ValueFlowExplorer<'g> {
     /// Insert a new abstract location node for a storage location in a context.
     fn insert_loc(&mut self, addr: u64, trace: &[u64], storage: StorageLocation) -> usize {
         let location = AbstractLocation::new(addr, trace.to_vec(), storage);
-        let node = ValueFlowNode::Location(location);
+        let node = DependencyNode::Location(location);
         self.insert_node(node)
     }
 
     /// Add a node to the list. This
     /// - inserts it and returns the new index if it didn't exist before
     /// - finds the existing node and returns it's index
-    fn insert_node(&mut self, node: ValueFlowNode) -> usize {
+    fn insert_node(&mut self, node: DependencyNode) -> usize {
         let new_index = self.nodes.len();
         *self.nodes.entry(node).or_insert(new_index)
     }
@@ -468,17 +466,17 @@ mod tests {
         let path = format!("target/bin/{}", filename);
 
         let program = Program::new(path);
-        let control_graph = ControlFlowGraph::new(&program);
-        let value_graph = ValueFlowGraph::new(&control_graph);
+        let cfg = ControlFlowGraph::new(&program);
+        let ddg = DataDependencyGraph::new(&cfg);
 
-        compile("value", filename, |file| {
-            value_graph.visualize(file, filename)
+        compile("data", filename, |file| {
+            ddg.visualize(file, filename)
         });
     }
 
-    #[test] fn value_bufs() { test("bufs") }
-    #[test] fn value_paths() { test("paths") }
-    #[test] fn value_deep() { test("deep") }
-    #[test] fn value_overwrite() { test("overwrite") }
-    #[test] fn value_min() { test("min") }
+    #[test] fn data_bufs() { test("bufs") }
+    #[test] fn data_paths() { test("paths") }
+    #[test] fn data_deep() { test("deep") }
+    #[test] fn data_overwrite() { test("overwrite") }
+    #[test] fn data_min() { test("min") }
 }
